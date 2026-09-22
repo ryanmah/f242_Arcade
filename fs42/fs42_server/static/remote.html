@@ -62,11 +62,39 @@
         <!-- Function Buttons -->
         <div class="button-grid function-section">
             <button class="remote-btn function-btn" data-key="guide">GUIDE</button>
-            <button class="remote-btn function-btn" data-key="exit">EXIT</button>
+            <button class="remote-btn function-btn" data-key="menu">MENU</button>
             <button class="remote-btn function-btn" data-key="mute">MUTE</button>
             <button class="remote-btn function-btn" data-key="info">INFO</button>
         </div>
+
+        <!-- Menu navigation (drives the on-screen channel menu) -->
+        <div class="dpad" id="dpad">
+            <div></div>
+            <button class="remote-btn dpad-btn" data-key="nav_up" title="Up">&#9650;</button>
+            <div></div>
+            <button class="remote-btn dpad-btn" data-key="nav_left" title="Left">&#9664;</button>
+            <button class="remote-btn dpad-btn dpad-ok" data-key="nav_select" title="Select">OK</button>
+            <button class="remote-btn dpad-btn" data-key="nav_right" title="Right">&#9654;</button>
+            <button class="remote-btn dpad-btn dpad-back" data-key="nav_back" title="Back">BACK</button>
+            <button class="remote-btn dpad-btn" data-key="nav_down" title="Down">&#9660;</button>
+            <button class="remote-btn dpad-btn dpad-exit" data-key="exit" title="Web console">WEB</button>
+        </div>
     </div>
+
+    <style>
+        /* D-pad styling lives here rather than in the themes so every theme
+           renders it; the buttons inherit .remote-btn from the active theme. */
+        .dpad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            justify-items: center;
+            margin-bottom: 15px;
+        }
+        .dpad-btn { width: 70px; height: 44px; font-size: 14px; }
+        .dpad-ok { font-weight: bold; }
+        .dpad-back, .dpad-exit { font-size: 10px; }
+    </style>
 
     <script>
         // Basic remote control functionality
@@ -409,6 +437,29 @@
                     } catch (error) {
                         console.error('Mute failed:', error);
                         showVolumeDisplay('ERROR');
+                    }
+                    break;
+                case 'menu':
+                    try {
+                        await window.fs42Api.post('player/menu/open');
+                        display.textContent = 'MENU';
+                    } catch (error) {
+                        console.error('Menu command failed:', error);
+                        display.textContent = 'ERROR';
+                    }
+                    break;
+                case 'nav_up':
+                case 'nav_down':
+                case 'nav_left':
+                case 'nav_right':
+                case 'nav_select':
+                case 'nav_back':
+                    try {
+                        await window.fs42Api.post('player/menu/input/' + key.substring(4));
+                        display.textContent = key.substring(4).toUpperCase();
+                    } catch (error) {
+                        console.error('Menu input failed:', error);
+                        display.textContent = 'ERROR';
                     }
                     break;
                 case 'guide':

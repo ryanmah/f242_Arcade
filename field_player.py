@@ -4,10 +4,11 @@ import argparse
 import time
 import datetime
 import json
-import shelve
-import signal
 import logging
 
+from fs42 import ipc
+from fs42 import paths
+from fs42 import platform_compat
 from fs42.liquid_manager import LiquidManager
 from fs42.station_manager import StationManager
 from fs42.timings import MIN_1, DAYS
@@ -35,60 +36,98 @@ try:
 except ModuleNotFoundError:
     logging.getLogger("FieldPlayer").warning("Error importing ticker - using the ticker will cause an error.")
 
-STATE_SHELVE = "runtime/player_state.bin"
 api_commands_queue: multiprocessing.Queue = None
+_exit_requested = False
+
+
+def request_exit():
+    """Ask the main loop to wind down at its next safe point."""
+    global _exit_requested
+    _exit_requested = True
+
+def _handle_player_command(q_message):
+    """Interpret one command aimed at the player.
+
+    Commands reach us two ways: over a multiprocessing.Queue when the player
+    started the API itself, and over the sqlite state bus when the supervisor
+    runs the API as a separate process.  Same payloads either way.
+    """
+    command = q_message.get("command", None)
+    if not command:
+        return None
+    match command:
+        case "exit":
+            return PlayerOutcome(PlayerState.EXIT_COMMAND)
+        case "reload_data":
+            LiquidManager().reload_schedules()
+        case "guide":
+            try:
+                c_number = StationManager().guide_config["channel_number"]
+                change_request = {"command": "direct", "channel": c_number}
+                return PlayerOutcome(PlayerState.CHANNEL_CHANGE, json.dumps(change_request))
+            except TypeError:
+                logging.getLogger("InputCheck").warning("Guide channel not configured")
+        case "ticker":
+            message = q_message.get("message", None)
+            header = q_message.get("header", None)
+            style = q_message.get("style", None)
+            iterations = q_message.get("iterations", None)
+            run_ticker(message, header, style, iterations)
+        case "play_file":
+            file_path = q_message.get("file_path", None)
+            return PlayerOutcome(PlayerState.PLAY_FILE, file_path)
+        case "web_key":
+            key = q_message.get("key", "")
+            return PlayerOutcome(PlayerState.SUCCESS, f"web_key:{key}")
+        case "mpv_command":
+            action = q_message.get("action", "")
+            return PlayerOutcome(PlayerState.SUCCESS, f"mpv_command:{action}")
+        case "menu":
+            return PlayerOutcome(PlayerState.SUCCESS, "menu:open")
+        case "reload_stations":
+            return PlayerOutcome(PlayerState.RELOAD_STATIONS)
+        case "tune":
+            channel = q_message.get("channel")
+            if channel is not None:
+                return PlayerOutcome(
+                    PlayerState.CHANNEL_CHANGE,
+                    json.dumps({"command": "direct", "channel": channel}),
+                )
+    return None
+
 
 def input_check():
+    if _exit_requested:
+        return PlayerOutcome(PlayerState.EXIT_COMMAND)
+
     if api_commands_queue:
         q_message = None
         try:
             q_message = api_commands_queue.get(block=False)
         except Empty:
             pass
-        
         if q_message:
-            command = q_message.get("command", None)
-            if not command:
-                return
-            match command:
-                case "exit":
-                    return PlayerOutcome(PlayerState.EXIT_COMMAND)
-                case "reload_data":
-                    LiquidManager().reload_schedules()
-                case "guide":
-                    try:
-                        c_number = StationManager().guide_config["channel_number"]
-                        change_request = {"command": "direct", "channel": c_number}
-                        return PlayerOutcome(PlayerState.CHANNEL_CHANGE, json.dumps(change_request))
-                    except TypeError:
-                        logging.getLogger("InputCheck").warning("Guide channel not configured")
-                case "ticker":
-                    message = q_message.get("message", None)
-                    header = q_message.get("header", None)
-                    style = q_message.get("style", None)
-                    iterations = q_message.get("iterations", None)
-                    run_ticker(message, header, style, iterations)
-                case "play_file":
-                    file_path = q_message.get("file_path", None)
-                    return PlayerOutcome(PlayerState.PLAY_FILE, file_path)
-                case "web_key":
-                    key = q_message.get("key", "")
-                    return PlayerOutcome(PlayerState.SUCCESS, f"web_key:{key}")
-                case "mpv_command":
-                    action = q_message.get("action", "")
-                    return PlayerOutcome(PlayerState.SUCCESS, f"mpv_command:{action}")
+            outcome = _handle_player_command(q_message)
+            if outcome is not None:
+                return outcome
 
+    bus_message = ipc.pop(ipc.TOPIC_PLAYER_CMD, "player")
+    if bus_message:
+        outcome = _handle_player_command(bus_message)
+        if outcome is not None:
+            return outcome
 
-    channel_socket = StationManager().server_conf["channel_socket"]
-    with open(channel_socket, "r") as r_sock:
-        contents = r_sock.read()
-    if len(contents):
-        with open(channel_socket, "w"):
-            pass
-        return PlayerOutcome(PlayerState.CHANNEL_CHANGE, contents)
+    # Channel commands from the web console, the remote and any external
+    # script arrive through the state bus (which also drains the legacy
+    # runtime/channel.socket file for backwards compatibility).
+    if ipc.shutdown_requested():
+        return PlayerOutcome(PlayerState.EXIT_COMMAND)
+
+    pending = ipc.pop(ipc.TOPIC_CHANNEL, "player")
+    if pending:
+        payload = pending.get("payload") if pending.get("command") == "raw" else json.dumps(pending)
+        return PlayerOutcome(PlayerState.CHANNEL_CHANGE, payload)
     return None
-
-
 
 
 def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=None):
@@ -105,12 +144,6 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
         logger.info("Live schedule agent is active")
     else:
         logger.info("Live schedule agent is not configured")
-
-    channel_socket = StationManager().server_conf["channel_socket"]
-
-    # go ahead and clear the channel socket (or create if it doesn't exist)
-    with open(channel_socket, "w"):
-        pass
 
     if not len(manager.stations):
         logger.error(
@@ -130,8 +163,7 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     if not start_channel_config:
         use_saved = StationManager().server_conf.get("recall_last_channel", True)
         if use_saved:
-            with shelve.open(STATE_SHELVE) as s:
-                channel_index = s.get("channel_index", 0)
+            channel_index = ipc.get_state(ipc.KEY_CHANNEL_INDEX, 0)
     else:
         channel_index = manager.index_from_channel(start_channel_config)
         if not channel_index:
@@ -146,15 +178,16 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     player = StationPlayer(manager.stations[channel_index], input_check)
     if schedule_lock:
         player.schedule_lock = schedule_lock
-    stand_by = StationManager().server_conf.get("standby_image", "runtime/standby.png")
+    player.attach_osd()
+    stand_by = StationManager().server_conf.get("standby_image", str(paths.runtime("standby.png")))
     reception.degrade()
     player.update_filters()
     player.play_file(stand_by)
 
     player.load_up()
 
-    def signal_handler(sig, frame):
-        logger.critical("Received sig-int signal, attempting to exit gracefully...")
+    def graceful_exit(reason="signal"):
+        logger.critical("Shutting down (%s)...", reason)
         player.shutdown()
 
         update_status_socket("stopped", "", -1)
@@ -163,11 +196,14 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
             shutdown_queue.put("shutdown")
         if api_proc is not None:
             api_proc.join(timeout=5)
-        logger.info("Shutdown completed as expected - exiting application")
-        exit(0)
+        logger.info("Shutdown completed as expected")
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Registered through platform_compat so Windows gets SIGBREAK rather than
+    # a SIGTERM handler that is legal to install but never delivered.  The
+    # handler only raises a flag; the main loop does the actual teardown, so
+    # the process can return an exit code the supervisor can act on instead of
+    # calling exit() from inside a signal frame.
+    platform_compat.install_shutdown_handlers(lambda signum: request_exit())
 
     channel_conf = manager.stations[channel_index]
 
@@ -271,8 +307,7 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
                     found = not station_cache[channel_index]["hidden"]
 
             # save the player state
-            with shelve.open(STATE_SHELVE) as s:
-                s["channel_index"] = channel_index
+            ipc.set_state(ipc.KEY_CHANNEL_INDEX, channel_index)
             channel_conf = station_cache[channel_index]
             player.station_config = channel_conf
 
@@ -284,12 +319,38 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
             skip_play = True
             player_state = player.play_and_wait(player_state.payload)
 
+        elif player_state.status == PlayerState.RELOAD_STATIONS:
+            # The menu (or web console) changed the station files.  Re-read
+            # them and keep playing the same channel if it still exists; if it
+            # was deleted, retune rather than crash on a missing station.
+            current_number = channel_conf["channel_number"]
+            try:
+                player.reload_stations()
+            except Exception as e:
+                logger.exception(e)
+                logger.error("Station reload failed; keeping the previous station list")
+            if not len(manager.stations):
+                logger.error("All stations were removed; stopping")
+                graceful_exit("no stations")
+                return 0
+            new_index = manager.index_from_channel(current_number)
+            if new_index is None:
+                logger.warning("Current channel %s no longer exists; tuning to the first station", current_number)
+                channel_index = 0
+            else:
+                channel_index = new_index
+            ipc.set_state(ipc.KEY_CHANNEL_INDEX, channel_index)
+            channel_conf = manager.stations[channel_index]
+            player.station_config = channel_conf
+            if new_index is None:
+                transition_fn(player, reception)
+
         elif player_state.status == PlayerState.FAILED:
             stuck_timer += 1
 
             # only put it up once after 2 seconds of being stuck
             if stuck_timer == 2:
-                stand_by = channel_conf.get("standby_image", StationManager().server_conf.get("standby_image", "runtime/standby.png"))
+                stand_by = channel_conf.get("standby_image", StationManager().server_conf.get("standby_image", str(paths.runtime("standby.png"))))
                 player.play_file(stand_by)
             current_title_on_stuck = player.get_current_path()
             update_status_socket(
@@ -314,7 +375,8 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
         elif player_state.status == PlayerState.SUCCESS:
             stuck_timer = 0
         elif player_state.status == PlayerState.EXIT_COMMAND:
-            signal_handler(None, None)
+            graceful_exit("exit command")
+            return 0
         else:
             stuck_timer = 0
 
@@ -325,7 +387,59 @@ def start_api_server_with_shutdown_queue(shutdown_queue, command_q):
     fs42_server.run_with_shutdown_queue(shutdown_queue, command_q)
 
 
-if __name__ == "__main__":
+def run_player(transition_fn=None, no_server=False):
+    """Run the TV player.
+
+    This is the body of what upstream had inline under ``__main__``.  It is a
+    function now so the single-executable supervisor can invoke it as a role,
+    and so it can return an exit code instead of calling ``exit()``.
+
+    ``no_server`` is the normal case under the supervisor, which runs the API
+    as its own supervised child.  Running the player directly (or with
+    ``--no_server`` unset) still starts the API as a child process, so
+    ``python field_player.py`` behaves as it always has.
+    """
+    global api_commands_queue
+
+    if transition_fn is None:
+        transition_fn = short_change_effect
+
+    # The state bus must exist before anything reads or writes status.
+    paths.first_run_seed()
+    ipc.init_db()
+
+    shutdown_queue = None
+    api_proc = None
+    if not no_server:
+        shutdown_queue = multiprocessing.Queue()
+        api_commands_queue = multiprocessing.Queue()
+        api_proc = multiprocessing.Process(
+            target=start_api_server_with_shutdown_queue,
+            args=(shutdown_queue, api_commands_queue),
+            daemon=True,
+        )
+        api_proc.start()
+    else:
+        api_commands_queue = None
+
+    schedule_lock = multiprocessing.Lock()
+
+    try:
+        main_loop(
+            transition_fn,
+            shutdown_queue=shutdown_queue,
+            api_proc=api_proc,
+            schedule_lock=schedule_lock,
+        )
+    finally:
+        if shutdown_queue is not None:
+            shutdown_queue.put("shutdown")
+        if api_proc is not None:
+            api_proc.join(timeout=5)
+    return 0
+
+
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="FieldStation42 Player")
     parser.add_argument(
         "-t",
@@ -342,13 +456,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Set logging verbosity level to very chatty",
     )
-
     parser.add_argument(
         "--no_server",
         action="store_true",
         help="Do not start the web API server process.",
     )
-    args = parser.parse_args()
+    return parser.parse_known_args(argv)[0]
+
+
+def main(argv=None):
+    args = _parse_args(argv)
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -357,42 +474,22 @@ if __name__ == "__main__":
         formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(name)s:%(message)s")
         fh = logging.FileHandler(args.logfile)
         fh.setFormatter(formatter)
-
         logging.getLogger().addHandler(fh)
 
-    trans_fn = short_change_effect
+    transitions = {
+        "long": long_change_effect,
+        "short": short_change_effect,
+        "none": none_change_effect,
+    }
+    trans_fn = transitions.get(args.transition or "short")
 
-    if args.transition:
-        if args.transition == "long":
-            trans_fn = long_change_effect
-        elif args.transition == "none":
-            trans_fn = none_change_effect
-        # else keep short change as default
+    return run_player(transition_fn=trans_fn, no_server=args.no_server)
 
-    if not args.no_server:
-        # Set up shutdown queue and start API server as a background process
-        shutdown_queue = multiprocessing.Queue()
-        api_commands_queue = multiprocessing.Queue()
-        api_proc = multiprocessing.Process(
-            target=start_api_server_with_shutdown_queue,
-            args=(
-                shutdown_queue,
-                api_commands_queue,
-            ),
-            daemon=True,
-        )
-        api_proc.start()
-    else:
-        shutdown_queue = None
-        api_commands_queue = None
-        api_proc = None
 
-    schedule_lock = multiprocessing.Lock()
-
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
     try:
-        main_loop(trans_fn, shutdown_queue=shutdown_queue, api_proc=api_proc, schedule_lock=schedule_lock)
-    finally:
-        if shutdown_queue is not None:
-            shutdown_queue.put("shutdown")
-        if api_proc is not None:
-            api_proc.join(timeout=5)
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+    raise SystemExit(main())

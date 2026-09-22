@@ -1,5 +1,6 @@
 import logging
 import os
+from fs42 import paths
 from fs42.slot_reader import SlotReader
 from fs42.station_io import StationIO
 
@@ -7,8 +8,6 @@ class StationManager(object):
     # the borg singleton pattern
     __we_are_all_one = {}
     _initialized = False
-
-    __main_config_path = "confs/main_config.json"
 
     # public visible - be careful
     stations = []
@@ -28,8 +27,8 @@ class StationManager(object):
             if not len(self.stations):
                 self.station_io = StationIO()
                 self.server_conf = {
-                    "channel_socket": "runtime/channel.socket",
-                    "status_socket": "runtime/play_status.socket",
+                    "channel_socket": str(paths.runtime("channel.socket")),
+                    "status_socket": str(paths.runtime("play_status.socket")),
                     "day_parts": {
                         "morning": range(6, 10),
                         "daytime": range(10, 18),
@@ -39,12 +38,20 @@ class StationManager(object):
                     },
                     "time_format": "%H:%M",
                     "date_time_format": "%Y-%m-%dT%H:%M:%S",
-                    "db_path": "runtime/fs42_fluid.db",
+                    "db_path": str(paths.runtime("fs42_fluid.db")),
                     "start_mpv": True,
                     "server_host": "0.0.0.0",
                     "server_port": 4242,
                     "title_patterns": [],
                     "video_seek_timeout": 10,
+                    "standby_image": str(paths.runtime("standby.png")),
+                    "osd_backend": "auto",
+                    # Drop mpv out of fullscreen while the in-app menu is open.
+                    # Off by default; the escape hatch for a window manager
+                    # that will not put the menu above fullscreen video.
+                    "menu_drop_fullscreen": False,
+                    # Poll a gamepad for menu navigation and channel changes.
+                    "gamepad": False,
                 }
                 self._number_index = {}
                 self._name_index = {}
@@ -59,7 +66,15 @@ class StationManager(object):
                 if station["network_type"] == "guide":
                     self.guide_config = station
                     logging.getLogger().info("Loading and checking guide channel")
-                    from fs42.guide_tk import GuideWindowConf
+                    try:
+                        from fs42.guide_tk import GuideWindowConf
+                    except ImportError as e:
+                        # tkinter is not installed. The guide channel will not
+                        # work, but nothing else should be held hostage to it.
+                        logging.getLogger().error(
+                            "Guide channel needs tkinter, which is not available: %s", e
+                        )
+                        continue
 
                     gconf = GuideWindowConf()
                     errors = gconf.check_config(station)
@@ -118,12 +133,28 @@ class StationManager(object):
                     "schedule_agent",
                     "video_seek_timeout",
                     "overlay_conf",
-                    "start_channel"
+                    "start_channel",
+                    # fork additions: bundled-binary overrides, OSD backend
+                    # selection and the legacy runtime/*.socket mirror switch.
+                    "mpv_path",
+                    "ffprobe_path",
+                    "osd_backend",
+                    "legacy_socket_files",
+                    # in-app menu
+                    "menu_drop_fullscreen",
+                    "gamepad",
+                    "volume_step",
                 ]
 
                 for key in to_check:
                     if key in d:
                         self.server_conf[key] = d[key]
+
+                # Paths that name files on disk are resolved against the user
+                # data directory so existing relative configs keep working.
+                for key in ("channel_socket", "status_socket", "db_path", "standby_image"):
+                    if key in d and d[key]:
+                        self.server_conf[key] = str(paths.resolve_user_path(d[key]))
 
                 # Load custom title patterns if provided
                 if "title_patterns" in d:
@@ -203,6 +234,7 @@ class StationManager(object):
 
             # Build indexes
             self._build_indexes()
+            self._confs_signature = self.confs_signature()
 
         except Exception as e:
             _l.error("*" * 60)
@@ -248,6 +280,33 @@ class StationManager(object):
             self._reload_stations()
 
         return success, message
+
+    def confs_signature(self):
+        """A cheap fingerprint of confs/*.json: (count, newest mtime)."""
+        import glob
+
+        files = glob.glob(os.path.join(self.station_io.confs_dir, "*.json"))
+        newest = 0.0
+        for path in files:
+            try:
+                newest = max(newest, os.path.getmtime(path))
+            except OSError:
+                continue
+        return (len(files), newest)
+
+    def reload_if_changed(self) -> bool:
+        """Reload when another process has edited the station files.
+
+        StationManager is per process, so the web console, the in-app menu
+        and the player each hold their own copy.  Callers that list stations
+        for a user (the summary API, the menu) use this so they never show a
+        stale list.  Returns True if a reload happened.
+        """
+        signature = self.confs_signature()
+        if getattr(self, "_confs_signature", None) == signature:
+            return False
+        self._reload_stations()
+        return True
 
     def _reload_stations(self):
         """Reload all station configurations from disk."""

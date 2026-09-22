@@ -3,7 +3,9 @@ import sys
 import os
 import subprocess
 
-sys.path.append(os.getcwd())
+from fs42 import ffmpeg_tools
+from fs42 import paths
+
 from fs42.catalog_entry import CatalogEntry
 import urllib.parse
 
@@ -107,30 +109,9 @@ class AutoBumpAgent:
         if not video_path or not os.path.exists(video_path):
             return None
 
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    video_path
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode != 0:
-                return None
-
-            duration = float(result.stdout.strip())
-            return duration if duration > 0 else None
-        except Exception:
-            return None
+        # ffmpeg_tools locates a bundled ffprobe first and suppresses the
+        # console window it would otherwise flash over fullscreen video.
+        return ffmpeg_tools.probe_duration(video_path, timeout=10)
 
     @staticmethod
     def resolve_bg_video_path(bg_video):
@@ -142,10 +123,14 @@ class AutoBumpAgent:
         if os.path.exists(bg_video):
             return bg_video
 
-        # bare filenames are served from static/bump/video, similar to bg_music
-        video_path = os.path.join("fs42", "fs42_server", "static", "bump", "video", str(bg_video))
-        if os.path.exists(video_path):
-            return video_path
+        # bare filenames are served from static/bump/video, similar to
+        # bg_music.  Look in the user's overlay directory first - the bundled
+        # static tree is read-only when frozen, so that is where user-added
+        # bump videos actually live.
+        for root in (paths.static_overlay("bump", "video"), paths.static_dir() / "bump" / "video"):
+            video_path = root / str(bg_video)
+            if video_path.exists():
+                return str(video_path)
 
         return None
 

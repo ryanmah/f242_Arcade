@@ -1,15 +1,25 @@
+# Runtime dependencies.
+#
+# Fork notes:
+#   - evdev and pyserial went with the Raspberry Pi hardware support. evdev has
+#     no Windows build at all, so keeping it here made `pip install -r` fail
+#     outright on Windows.
+#   - glfw and PyOpenGL went with the GLFW on-screen display, which mpv's own
+#     overlay compositing replaced.
+#   - ffmpeg-python went with the switch to a direct ffprobe call that can
+#     suppress the console window it pops on Windows.
+#   - Pillow, pydantic and psutil are imported directly by our code but used to
+#     arrive only as transitive dependencies; pin them explicitly.
 moviepy>=2.1.1
 python-mpv-jsonipc
-pyserial
 rich
 textual
-ffmpeg-python
 fastapi
 uvicorn
-glfw
-PyOpenGL
 PySide6>=6.8
 jsonschema
 requests
 mutagen
-evdev
+psutil
+Pillow
+pydantic

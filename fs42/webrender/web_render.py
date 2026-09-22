@@ -211,7 +211,6 @@ def web_render_runner(user_conf, queue):
 if __name__ == "__main__":
     import sys
     import os
-    sys.path.append(os.getcwd())
 
     # Simple test config - customize as needed
     test_conf = {

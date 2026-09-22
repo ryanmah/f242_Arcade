@@ -12,7 +12,11 @@ import logging
 import time
 from python_mpv_jsonipc import MPV
 
-from fs42.guide_tk import guide_channel_runner, GuideCommands
+from fs42 import ipc
+from fs42 import paths
+from fs42 import platform_compat
+# guide_tk pulls in tkinter, which not every install has and which only the
+# guide channel needs.  Imported lazily so a missing tk never stops playback.
 from fs42.autobump_agent import AutoBumpAgent
 
 # Try to import web_render_runner, but handle gracefully if PySide6 (with QtWebEngine)
@@ -43,6 +47,19 @@ from fs42.slot_reader import SlotReader
 logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO)
 
 
+def _guide_channel_runner():
+    from fs42.guide_tk import guide_channel_runner
+
+    return guide_channel_runner
+
+
+def _guide_commands():
+    from fs42.guide_tk import GuideCommands
+
+    return GuideCommands
+
+
+
 def update_status_socket(
     status, network_name, channel, title=None, timestamp="%Y-%m-%dT%H:%M:%S", duration=None, file_path=None, content_type=None
 ):
@@ -60,10 +77,9 @@ def update_status_socket(
         status_obj["file_path"] = file_path
     if content_type is not None:
         status_obj["content_type"] = content_type
-    status_socket = StationManager().server_conf["status_socket"]
-    as_str = json.dumps(status_obj)
-    with open(status_socket, "w") as fp:
-        fp.write(as_str)
+    # Published through the sqlite state bus; ipc mirrors it to the legacy
+    # runtime/play_status.socket file for existing user scripts.
+    ipc.set_status(status_obj)
 
 
 class PlayerState(Enum):
@@ -73,6 +89,7 @@ class PlayerState(Enum):
     CHANNEL_CHANGE = 4
     EXIT_COMMAND = 5
     PLAY_FILE = 6
+    RELOAD_STATIONS = 7
 
 
 class PlayerOutcome:
@@ -169,19 +186,39 @@ class StationPlayer:
 
         if not mpv:
             self._l.info("Starting MPV instance")
-            # command on client: mpv --input-ipc-server=/tmp/mpvsocket --idle --force-window 
 
-            # if not running on trixie
-            self.mpv = MPV(
-                start_mpv=start_it,
-                ipc_socket="/tmp/mpvsocket",
-                input_default_bindings=False,
-                fs=True,
-                idle=True,
-                force_window=True,
-                script_opts="osc-idlescreen=no",
-                hr_seek="yes",
-            )
+            # python-mpv-jsonipc adds the \\.\pipe\ prefix itself on Windows,
+            # so this must be a bare name there and a real path elsewhere.
+            self.ipc_endpoint = platform_compat.mpv_ipc_name()
+            mpv_binary = paths.bin_path("mpv") if start_it else None
+            if start_it and mpv_binary is None:
+                self._l.error(
+                    "Could not find mpv. Install it or set \"mpv_path\" in %s",
+                    paths.confs("main_config.json"),
+                )
+
+            mpv_kwargs = {
+                "start_mpv": start_it,
+                "ipc_socket": self.ipc_endpoint,
+                "input_default_bindings": False,
+                "fs": True,
+                "idle": True,
+                "force_window": True,
+                "script_opts": "osc-idlescreen=no",
+                "hr_seek": "yes",
+            }
+            if mpv_binary is not None:
+                mpv_kwargs["mpv_location"] = str(mpv_binary)
+            if start_it:
+                # Closing the mpv window or pressing q is the only "I want out"
+                # affordance in a windowed build with no console.
+                mpv_kwargs["quit_callback"] = self._on_mpv_quit
+
+            self.mpv = MPV(**mpv_kwargs)
+            if start_it:
+                self._bind_menu_keys()
+        else:
+            self.ipc_endpoint = None
 
         self.station_config = station_config
         # self.playlist = self.read_json(runtime_filepath)
@@ -197,6 +234,183 @@ class StationPlayer:
         self.schedule_lock = None
         self._active_afx = None
         self._pending_response = None
+        self.osd = None
+        self.menu_process = None
+        self._menu_fullscreen_dropped = False
+        self._gamepad = None
+        if StationManager().server_conf.get("gamepad"):
+            self._start_gamepad()
+
+    def _on_mpv_quit(self):
+        """mpv window closed by the user - bring the whole app down with it."""
+        self._l.info("mpv exited - requesting application shutdown")
+        try:
+            ipc.request_shutdown("mpv_quit")
+        except Exception:
+            pass
+
+    def attach_osd(self):
+        """Create the on-screen display bound to this mpv instance."""
+        try:
+            from fs42.osd.backends import create_backend
+
+            self.osd = create_backend(self.mpv)
+        except Exception as e:
+            self._l.warning("On-screen display unavailable: %s", e)
+            self.osd = None
+        return self.osd
+
+    def tick_osd(self):
+        self.poll_menu()
+        if self.osd is not None:
+            try:
+                self.osd.tick()
+            except Exception as e:
+                self._l.debug("OSD tick failed: %s", e)
+                self.osd = None
+
+    def set_volume(self, action):
+        """Volume through mpv rather than the system mixer.
+
+        Upstream shelled out to amixer/pactl/wpctl, none of which exist on
+        Windows.  Driving mpv's own properties also scopes volume to the TV
+        rather than the whole machine, which is what an appliance should do.
+        """
+        step = StationManager().server_conf.get("volume_step", 5)
+        try:
+            current = self.mpv.volume
+            current = 100 if current is None else float(current)
+            if action == "up":
+                self.mpv.volume = min(100.0, current + step)
+            elif action == "down":
+                self.mpv.volume = max(0.0, current - step)
+            elif action == "mute":
+                self.mpv.mute = not bool(self.mpv.mute)
+            muted = bool(self.mpv.mute)
+            level = int(float(self.mpv.volume or 0))
+        except Exception as e:
+            self._l.warning("Volume command '%s' failed: %s", action, e)
+            return None
+
+        response = {
+            "volume": f"{level}%",
+            "level": level,
+            "muted": muted,
+            "method": "mpv",
+        }
+        ipc.set_volume(response)
+        return response
+
+    # ------------------------------------------------------------ in-app menu
+
+    def _bind_menu_keys(self):
+        """Route keys pressed on the mpv window to the menu.
+
+        mpv owns the fullscreen window, so this is where a keyboard (or an IR
+        remote that presents as one) lands.  Escape opens the menu; while it is
+        open, navigation keys are forwarded over the state bus so the menu works
+        even if the window manager never hands the Qt window keyboard focus.
+        The callbacks run on the IPC thread, so they only push messages.
+        """
+        from fs42.menu.input import MPV_KEY_ACTIONS, Action
+
+        # mpv re-fires a held key at its autorepeat rate.  Navigation may
+        # repeat, but slowly; anything that opens, closes or activates must
+        # not, or one long press on Escape opens and closes the menu in a loop.
+        navigation = {Action.UP.value, Action.DOWN.value, Action.LEFT.value, Action.RIGHT.value,
+                      Action.PAGE_UP.value, Action.PAGE_DOWN.value}
+        last_fired = {}
+
+        def make(action):
+            def callback():
+                now = time.monotonic()
+                gap = 0.12 if action in navigation else 0.35
+                if now - last_fired.get(action, 0.0) < gap:
+                    return
+                last_fired[action] = now
+                try:
+                    if action == Action.BACK.value and not ipc.get_state(ipc.KEY_MENU_OPEN):
+                        # Escape with no menu up: open it.
+                        ipc.push(ipc.TOPIC_PLAYER_CMD, {"command": "menu"})
+                    elif ipc.get_state(ipc.KEY_MENU_OPEN):
+                        ipc.push(ipc.TOPIC_MENU_INPUT, {"action": action})
+                except Exception as e:
+                    self._l.debug("menu key forward failed: %s", e)
+            return callback
+
+        try:
+            for key, action in MPV_KEY_ACTIONS.items():
+                self.mpv.bind_key_press(key, make(action))
+        except Exception as e:
+            self._l.warning("Could not bind menu keys on mpv: %s", e)
+
+    def _start_gamepad(self):
+        try:
+            from fs42.menu.gamepad import GamepadReader
+
+            self._gamepad = GamepadReader()
+            self._gamepad.start()
+        except Exception as e:
+            self._l.warning("Gamepad support unavailable: %s", e)
+
+    def menu_is_open(self) -> bool:
+        return bool(self.menu_process is not None and self.menu_process.is_alive())
+
+    def open_menu(self):
+        if self.menu_is_open():
+            return
+        from fs42.menu.app import run_menu
+
+        self._l.info("Opening the channel menu")
+        ipc.set_state(ipc.KEY_MENU_OPEN, True)
+        if StationManager().server_conf.get("menu_drop_fullscreen"):
+            try:
+                self.mpv.fs = False
+                self.mpv.ontop = False
+                self._menu_fullscreen_dropped = True
+            except Exception:
+                pass
+        self.menu_process = run_menu()
+
+    def close_menu(self):
+        """Called once the menu process has exited."""
+        if self.menu_process is not None:
+            try:
+                self.menu_process.join(timeout=0.5)
+            except Exception:
+                pass
+        self.menu_process = None
+        ipc.set_state(ipc.KEY_MENU_OPEN, False)
+        if self._menu_fullscreen_dropped:
+            try:
+                self.mpv.fs = True
+            except Exception:
+                pass
+            self._menu_fullscreen_dropped = False
+
+    def poll_menu(self):
+        """Notice the menu closing.  Cheap enough for the 50ms wait loops."""
+        if self.menu_process is not None and not self.menu_process.is_alive():
+            self.close_menu()
+
+    def reload_stations(self):
+        """Re-read station configs written by the menu or the web console.
+
+        StationManager is a per-process singleton, so edits made elsewhere are
+        invisible here until this runs.  Upstream never does it; a running
+        player did not learn about new stations until restart.
+        """
+        manager = StationManager()
+        manager._reload_stations()
+        # __init__ is the only place upstream sets guide_config.
+        manager.guide_config = None
+        for station in manager.stations:
+            if station["network_type"] == "guide":
+                manager.guide_config = station
+            elif station["network_type"] == "web" and "static/customguide/customguide.html" in station.get("web_url", ""):
+                manager.guide_config = station
+        LiquidManager().reload_schedules()
+        self._l.info("Reloaded %d station(s)", len(manager.stations))
 
     def load_up(self):
         start_time = time.perf_counter()
@@ -209,6 +423,14 @@ class StationPlayer:
 
     def mpv_runtime_command(self, action):
         """Run a small set of user-facing mpv runtime commands."""
+        # Volume is a property write rather than a command, and it needs to
+        # publish the new level for the on-screen meter.
+        if action.startswith("volume_"):
+            result = self.set_volume(action.split("_", 1)[1])
+            if result is not None and self.osd is not None:
+                self.tick_osd()
+            return result is not None
+
         mpv_command = self.MPV_RUNTIME_COMMANDS.get(action)
         if not mpv_command:
             self._l.warning(f"Unknown mpv runtime command: {action}")
@@ -232,6 +454,14 @@ class StationPlayer:
         ):
             action = response.payload.split(":", 1)[1]
             self.mpv_runtime_command(action)
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and response.payload == "menu:open"
+        ):
+            self.open_menu()
             return True
 
         return False
@@ -322,7 +552,31 @@ class StationPlayer:
         self._l.info("Terminating now playing overlay")
         self._close_now_playing()
 
-        self.mpv.terminate()
+        if self.menu_is_open():
+            try:
+                self.menu_process.terminate()
+                self.menu_process.join(timeout=1)
+            except Exception:
+                pass
+        ipc.set_state(ipc.KEY_MENU_OPEN, False)
+        if self._gamepad is not None:
+            try:
+                self._gamepad.stop()
+            except Exception:
+                pass
+
+        if self.osd is not None:
+            try:
+                self.osd.close()
+            except Exception:
+                pass
+            self.osd = None
+
+        try:
+            self.mpv.terminate()
+        except Exception as e:
+            self._l.debug("mpv terminate raised: %s", e)
+        platform_compat.terminate_ipc_endpoint(getattr(self, "ipc_endpoint", None))
 
     def update_filters(self):
         self.mpv.vf = self.reception.filter()
@@ -421,11 +675,13 @@ class StationPlayer:
                             if response and not self.handle_runtime_command_outcome(response):
                                 self._pending_response = response
                                 return False
+                        self.tick_osd()
                         time.sleep(0.05)
                     except Exception as e:
                         if time.time() - start_time > timeout_seconds:
                             self._l.error(f"Error waiting for playback: {e}")
                             return False
+                        self.tick_osd()
                         time.sleep(0.05)
 
                 # Perform seek if needed (before showing overlay)
@@ -496,6 +752,7 @@ class StationPlayer:
                     patience = time.time() + verify_window
                 elif time.time() >= patience:
                     break  # idle and not landed -> dropped, re-issue
+                self.tick_osd()
                 time.sleep(0.05)
 
             self._l.debug(f"Seek to {offset_seconds} on {file_path} did not land (attempt {attempt}); retrying")
@@ -527,6 +784,7 @@ class StationPlayer:
 
         # this will keep going until channel change or other interrupt
         while True:
+            self.tick_osd()
             time.sleep(0.05)
             response = self.input_check_fn()
             if response:
@@ -630,7 +888,7 @@ class StationPlayer:
         # create the pipe to communicate with the guide channel
         queue = multiprocessing.Queue()
         guide_process = multiprocessing.Process(
-            target=guide_channel_runner,
+            target=_guide_channel_runner(),
             args=(
                 guide_config,
                 queue,
@@ -694,13 +952,14 @@ class StationPlayer:
         )
         keep_going = True
         while keep_going:
+            self.tick_osd()
             time.sleep(0.05)
             response = self.input_check_fn()
             if response:
                 if self.handle_runtime_command_outcome(response):
                     continue
                 self._l.info("Sending the guide channel shutdown command")
-                queue.put(GuideCommands.hide_window)
+                queue.put(_guide_commands().hide_window)
                 guide_process.join()
                 return response
 
@@ -751,6 +1010,7 @@ class StationPlayer:
 
         keep_going = True
         while keep_going:
+            self.tick_osd()
             time.sleep(0.05)
 
             # Check if duration has expired
@@ -953,6 +1213,7 @@ class StationPlayer:
                             keep_waiting = False
                         else:
                             # debounce time
+                            self.tick_osd()
                             time.sleep(0.05)
                             response = self.input_check_fn()
                             if response:

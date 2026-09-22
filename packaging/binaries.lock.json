@@ -1,0 +1,75 @@
+{
+  "_comment": [
+    "Pinned helper binaries bundled into the distributable build.",
+    "Nothing binary is committed to this repository; fetch_binaries.py downloads",
+    "these at build time and verifies each archive against the sha256 below.",
+    "",
+    "These URLs are also the written offer of source required by the GPL: mpv is",
+    "GPLv2+ and the ffmpeg builds are GPLv3. See THIRD_PARTY_LICENSES.md.",
+    "",
+    "Fields:",
+    "  url      exact download; the digest below belongs to this file",
+    "  sha256   null means 'not yet pinned' - CI refuses it for releases",
+    "  release  {repo, asset} - used to find a replacement when the pinned url",
+    "           has gone away (nightly builders prune old releases) and by",
+    "           `fetch_binaries.py --update` to move the pin forward",
+    "  rolling  true when the url is a moving tag ('latest'): a digest mismatch",
+    "           is reported and the new digest recorded in the build manifest",
+    "           instead of failing the build",
+    "  archive  zip | 7z | tar.gz | tar.xz | appimage",
+    "  extract  glob patterns of files to copy into vendor/<platform>/",
+    "",
+    "Whatever actually gets bundled is written to vendor/<platform>/MANIFEST.json",
+    "with its digest, and that file ships inside the application."
+  ],
+  "platforms": {
+    "windows-x64": {
+      "mpv": {
+        "url": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-09-22-c646756799/mpv-x86_64-20260922-git-c646756799.7z",
+        "sha256": "61a45e936896724405fa8f3ff250427e1c6c54ed0447fc48ff25e879f86e6fc5",
+        "release": {"repo": "zhongfly/mpv-winbuild", "asset": "mpv-x86_64-[0-9]*-git-*.7z"},
+        "archive": "7z",
+        "extract": ["mpv.exe", "mpv.com"],
+        "license": "GPLv2+",
+        "source": "https://github.com/zhongfly/mpv-winbuild",
+        "_note": "Static build: mpv.exe carries every codec and needs no DLLs."
+      },
+      "ffmpeg": {
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        "sha256": "576ce558496dbf237dbc859a561e5240d59dc126baac921f59704d52260c060e",
+        "rolling": true,
+        "archive": "zip",
+        "extract": ["**/bin/ffmpeg.exe", "**/bin/ffprobe.exe"],
+        "license": "GPLv3",
+        "source": "https://github.com/BtbN/FFmpeg-Builds"
+      }
+    },
+    "linux-x64": {
+      "mpv": {
+        "url": "https://github.com/pkgforge-dev/mpv-AppImage/releases/download/v0.41.0%402026-09-07_1788787125/mpv-v0.41.0-anylinux-x86_64.AppImage",
+        "sha256": "bb52fb49c54e83155891bfb97578e7ee40575a306d0dddc96fc603be20db8214",
+        "release": {"repo": "pkgforge-dev/mpv-AppImage", "asset": "mpv-v*-anylinux-x86_64.AppImage"},
+        "archive": "appimage",
+        "appdir": "mpv.AppDir",
+        "wrapper": "mpv",
+        "strip": [
+          "bin/05-get-yt-dlp.hook",
+          "bin/10-self-updater.hook",
+          "bin/mpv-launch-gui.src.hook"
+        ],
+        "license": "GPLv2+",
+        "source": "https://github.com/pkgforge-dev/mpv-AppImage",
+        "_note": "Relocatable AppDir (glibc-free 'anylinux' build, works on SteamOS). The yt-dlp downloader and self-updater hooks are removed so mpv never touches the network on launch."
+      },
+      "ffmpeg": {
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+        "sha256": "c2e0aaeb9e15b9c1fa58310b907cab13ea985efdc61d0860e9997be8bca2c0e8",
+        "rolling": true,
+        "archive": "tar.xz",
+        "extract": ["**/bin/ffmpeg", "**/bin/ffprobe"],
+        "license": "GPLv3",
+        "source": "https://github.com/BtbN/FFmpeg-Builds"
+      }
+    }
+  }
+}

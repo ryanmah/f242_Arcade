@@ -67,22 +67,6 @@ if [[ ! "$enable_fp" =~ ^[Nn]$ ]]; then
     SERVICES_TO_ENABLE+=("fs42.service")
 fi
 
-# Cable Box
-echo ""
-echo -e "${BLUE}Cable Box${NC} - Cable box interface"
-read -p "Enable fs42-cable-box.service? (y/N): " enable_cb
-if [[ "$enable_cb" =~ ^[Yy]$ ]]; then
-    SERVICES_TO_ENABLE+=("fs42-cable-box.service")
-fi
-
-# Remote Controller
-echo ""
-echo -e "${BLUE}Remote Controller${NC} - Remote controller interface"
-read -p "Enable fs42-remote-controller.service? (y/N): " enable_rc
-if [[ "$enable_rc" =~ ^[Yy]$ ]]; then
-    SERVICES_TO_ENABLE+=("fs42-remote-controller.service")
-fi
-
 # OSD
 echo ""
 echo -e "${BLUE}On-Screen Display${NC} - Visual overlay (starts 30s after login)"

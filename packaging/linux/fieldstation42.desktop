@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FieldStation42
+GenericName=Broadcast TV simulator
+Comment=Flip channels on your own cable TV network
+Exec=@PREFIX@/FieldStation42
+Icon=fieldstation42
+Terminal=false
+Categories=AudioVideo;Video;Player;TV;
+Keywords=television;retro;cable;channels;mpv;
+StartupNotify=false
+StartupWMClass=mpv
+Actions=console;doctor;uninstall;
+
+[Desktop Action console]
+Name=Open web console
+Exec=xdg-open http://localhost:4242
+
+[Desktop Action doctor]
+Name=Check this computer
+Exec=@PREFIX@/FieldStation42 doctor
+
+[Desktop Action uninstall]
+Name=Uninstall FieldStation42
+Exec=@PREFIX@/FieldStation42 uninstall

@@ -3,7 +3,6 @@ import sys
 import datetime
 import glob
 
-sys.path.append(os.getcwd())
 
 import tkinter as tk  # import Tkinter
 from PIL import Image, ImageTk

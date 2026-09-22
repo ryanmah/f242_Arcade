@@ -1,0 +1,28 @@
+FieldStation42 is installed.
+
+GETTING STARTED
+
+  1. Start FieldStation42 from the Start Menu. A video window opens and
+     plays static until you add a channel.
+
+  2. Press Escape in the video window to open the channel menu, or open
+     http://localhost:4242 in a browser for the full console. Add a channel
+     by pointing it at a folder of video files.
+
+  3. Rebuild the catalog and add a week of schedule - both are in the menu.
+
+WHERE THINGS LIVE
+
+  Your channel configs, catalog and schedules are in
+  %LOCALAPPDATA%\FieldStation42 (Start Menu > FieldStation42 data folder).
+  Your video files stay wherever they already are.
+
+PHONE REMOTE
+
+  With the firewall rule enabled, open http://<this computer's name>:4242/remote
+  on a phone connected to the same Wi-Fi.
+
+IF SOMETHING IS WRONG
+
+  Start Menu > Check this computer (doctor) writes a report of what works on
+  this machine and opens it. Attach it to any bug report.

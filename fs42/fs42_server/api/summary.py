@@ -7,10 +7,17 @@ router = APIRouter(prefix="/summary", tags=["summary"])
 
 @router.get("/")
 async def get_summary():
+    # The in-app menu edits station files from another process.
+    if StationManager().reload_if_changed():
+        LiquidManager().reload_schedules()
     summaries = []
     for station in StationManager().stations:
         if station["_has_schedule"]:
-            sched_summary = LiquidManager().get_summary_json(network_name=station["network_name"])
+            try:
+                sched_summary = LiquidManager().get_summary_json(network_name=station["network_name"])
+            except ValueError:
+                # Station exists but has no schedule yet.
+                sched_summary = {"network_id": station["network_name"], "start": None, "end": None}
         else:
             sched_summary = {"network_name": station["network_name"], "start": 0, "end": 0}
         summary = {
@@ -27,6 +34,7 @@ async def get_summary():
 
 @router.get("/stations")
 async def get_stations():
+    StationManager().reload_if_changed()
     station_ids = [station["network_name"] for station in StationManager().stations]
     return {"network_names": station_ids}
 

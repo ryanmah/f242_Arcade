@@ -2,7 +2,6 @@ import os
 import sqlite3
 import sys
 
-sys.path.append(os.getcwd())
 import logging
 import datetime
 import math

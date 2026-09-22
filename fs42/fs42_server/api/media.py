@@ -1,8 +1,11 @@
 import os
+import re
 import mimetypes
 import logging
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
+
+from fs42 import paths
 
 router = APIRouter(prefix="/media", tags=["media"])
 logger = logging.getLogger("media_api")
@@ -10,18 +13,49 @@ logger = logging.getLogger("media_api")
 AUDIO_EXTENSIONS = {'.mp3', '.ogg', '.wav', '.flac', '.aac', '.m4a', '.opus'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.webm', '.avi', '.mkv', '.m4v'}
 
-# project root: fs42/fs42_server/api/media.py -> up three levels
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+GUIDE_VIDEOS_DIR = str(paths.runtime('guide_videos'))
 
-GUIDE_VIDEOS_DIR = os.path.join(PROJECT_ROOT, 'runtime', 'guide_videos')
+
+def _contained_by(candidate, root):
+    """True when candidate is root or lives beneath it.
+
+    Upstream compared with str.startswith, which lets "/opt/fs42-evil" pass a
+    check rooted at "/opt/fs42".  commonpath compares whole path components,
+    and normcase makes it case-insensitive on Windows.
+    """
+    candidate = os.path.normcase(str(candidate))
+    root = os.path.normcase(str(root))
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        # Different drives on Windows, or mixed absolute/relative.
+        return False
 
 
 def safe_resolve(relative_path):
-    clean = relative_path.lstrip('/').lstrip('\\')
-    resolved = os.path.realpath(os.path.join(PROJECT_ROOT, clean))
-    if not resolved.startswith(PROJECT_ROOT):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
-    return resolved
+    """Resolve a client-supplied path, refusing anything outside our roots.
+
+    Media legitimately lives outside the app directory (a station's
+    content_dir can point anywhere), so the allowed set is the data tree plus
+    the directories named by station configs - not a single prefix.
+    """
+    raw = str(relative_path or '')
+
+    # A drive-qualified Windows path survives lstrip('/\\') and would be
+    # treated as absolute by os.path.join, so reject absolutes explicitly and
+    # let them through only if they are inside a sandbox root.
+    if os.path.isabs(raw) or re.match(r'^[A-Za-z]:', raw):
+        resolved = os.path.realpath(raw)
+    else:
+        clean = raw.lstrip('/').lstrip('\\')
+        resolved = os.path.realpath(os.path.join(str(paths.data()), clean))
+
+    for root in paths.sandbox_roots():
+        if _contained_by(resolved, root):
+            return resolved
+
+    logger.warning("Rejected out-of-sandbox media path: %s", raw)
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
 
 
 @router.get("/list")

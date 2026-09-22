@@ -7,6 +7,7 @@ import shutil
 import datetime
 from pathlib import Path
 
+from fs42 import paths
 from fs42.config_processor import ConfigProcessor
 from fs42 import schedule_hint
 from fs42 import timings
@@ -33,15 +34,58 @@ class StationIO:
     # Fields that reference files that should exist
     FILE_CHECKS = ["content_dir", "sign_off_video", "off_air_video", "standby_image", "be_right_back_media"]
 
+    # Every field whose value names something on disk.  Resolved against the
+    # user data directory so configs are independent of the working directory.
+    PATH_FIELDS = [
+        "content_dir",
+        "sign_off_video",
+        "off_air_video",
+        "standby_image",
+        "be_right_back_media",
+        "commercial_dir",
+        "bump_dir",
+        "start_bump",
+        "end_bump",
+        "logo_dir",
+        "default_logo",
+        "multi_logo",
+        "catalog_path",
+        "schedule_path",
+        "runtime_dir",
+        "bg_music",
+        "bg_video",
+        "sound_to_play",
+    ]
+
     # Network types that don't have catalogs or schedules
     NO_CATALOG = {"guide", "streaming", "web"}
     NO_SCHEDULE = {"guide", "streaming", "web"}
 
     def __init__(self):
         self._l = logging.getLogger("STATIONIO")
-        self.confs_dir = "confs/"
-        self.main_config_path = "confs/main_config.json"
-        self.schema_path = "fs42/station_config_schema.json"
+        self.confs_dir = os.path.join(str(paths.confs()), "")
+        self.main_config_path = str(paths.confs("main_config.json"))
+        self.schema_path = str(paths.schema_path())
+
+    def _resolve_config_paths(self, node):
+        """Rewrite path-valued fields in place, recursing into slots.
+
+        Slot definitions and overrides carry the same keys as the top level
+        (bump_dir, commercial_dir, sequence media), so this walks the whole
+        config tree rather than only its root.
+        """
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                if key in StationIO.PATH_FIELDS and isinstance(value, str) and value:
+                    resolved = paths.resolve_user_path(value)
+                    if resolved is not None:
+                        node[key] = str(resolved)
+                elif isinstance(value, (dict, list)):
+                    self._resolve_config_paths(value)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, (dict, list)):
+                    self._resolve_config_paths(item)
 
     def load_schema(self):
         if os.path.exists(self.schema_path):
@@ -244,6 +288,12 @@ class StationIO:
             if key not in station_conf:
                 station_conf[key] = StationIO.OVERWATCH_DEFAULTS[key]
 
+        # Resolve every path-valued field against the user data directory.
+        # Configs written for upstream use CWD-relative paths like
+        # "catalog/nbc_catalog"; those keep working verbatim, they just no
+        # longer depend on which directory the app was launched from.
+        self._resolve_config_paths(station_conf)
+
         # Check that referenced files exist
         for to_check in StationIO.FILE_CHECKS:
             if to_check in station_conf:
@@ -389,10 +439,12 @@ class StationIO:
             self._l.error(error_msg)
             errors.append(error_msg)
 
-        # Warn about missing files (don't fail, just warn)
+        # Warn about missing files (don't fail, just warn).  Relative paths
+        # are relative to the data directory, not the working directory.
         for to_check in StationIO.FILE_CHECKS:
             if to_check in station_conf:
-                if not os.path.exists(station_conf[to_check]):
+                resolved = paths.resolve_user_path(station_conf[to_check])
+                if resolved is None or not os.path.exists(resolved):
                     warning = f"File not found: {station_conf[to_check]} (referenced in '{to_check}')"
                     self._l.warning(warning)
                     # Don't add to errors, just log warning

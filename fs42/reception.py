@@ -1,6 +1,8 @@
 import random
 import time
 
+from fs42 import paths
+
 debounce_fragment = 0.1
 
 def none_change_effect(player, reception):
@@ -30,7 +32,7 @@ def long_change_effect(player, reception):
         time.sleep(debounce_fragment)
 
     # reception.improve(1)
-    player.play_file("runtime/static.mp4")
+    player.play_file(str(paths.runtime("static.mp4")))
     while not reception.is_perfect():
         reception.improve()
         player.update_filters()

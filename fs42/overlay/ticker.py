@@ -8,6 +8,9 @@ from PySide6.QtGui import QPixmap, QColor, QPaintEvent, QPainter, QFont, QFontMe
 from PySide6.QtCore import QTimer, Qt, QPointF, QSharedMemory, QRect
 from pathlib import Path
 
+from fs42 import paths
+from fs42 import platform_compat
+
 
 class SingleApplication(QApplication):
     def __init__(self, argv, key):
@@ -22,13 +25,18 @@ class SingleApplication(QApplication):
                 with open(self.lock_file, 'r') as f:
                     pid = int(f.read().strip())
                 
-                # Check if process is actually running
-                try:
-                    os.kill(pid, 0)  # Doesn't kill, just checks if process exists
+                # Check if the process is actually running.  os.kill(pid, 0)
+                # is the POSIX idiom, but on Windows os.kill maps to
+                # TerminateProcess for every signal except CTRL_C/CTRL_BREAK -
+                # so the "probe" would kill whatever owns that pid.
+                if platform_compat.pid_alive(pid):
                     self._running = True
-                except (OSError, ProcessLookupError):
+                else:
                     # Process doesn't exist, remove stale lock file
-                    os.remove(self.lock_file)
+                    try:
+                        os.remove(self.lock_file)
+                    except OSError:
+                        pass
                     self._running = False
             except (ValueError, FileNotFoundError):
                 # Invalid lock file, remove it
@@ -149,7 +157,7 @@ class TickerWindow(QWidget):
     def load_fs42_logo(self):
         """Load FieldStation42 logo if available"""
         logo_paths = [
-            Path("runtime/toast_logo.png")
+            paths.runtime("toast_logo.png")
         ]
         
         for logo_path in logo_paths:
@@ -321,12 +329,21 @@ def run_ticker_app(text, title="FS42", style="fieldstation", iterations=2):
     sys.exit(app.exec())
 
 
+def _ticker_entry(text, title, style, iterations):
+    """Module-level process target.
+
+    A closure cannot be used here: on Windows (and anywhere the spawn start
+    method is in effect) multiprocessing pickles the target, and closures are
+    not picklable.
+    """
+    run_ticker_app(text, title, style, iterations)
+
+
 def run_ticker(text, title="FS42", style="fieldstation", iterations=2):
     """Start the ticker in a separate process"""
-    def ticker_process():
-        run_ticker_app(text, title, style, iterations)
-    
-    process = multiprocessing.Process(target=ticker_process)
+    process = multiprocessing.Process(
+        target=_ticker_entry, args=(text, title, style, iterations)
+    )
     process.start()
     return process
 

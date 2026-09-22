@@ -1,22 +1,36 @@
 import os
 from fastapi import APIRouter
 
+from fs42 import paths
+
 router = APIRouter(prefix="/about")
+
 
 @router.get("/themes")
 async def get_themes():
-    """Get list of available themes"""
-    theme_dir = "fs42/fs42_server/static/themes"
-    themes = []
-    try:
-        for file in os.listdir(theme_dir):
-            if file.endswith(".css"):
-                name = file.replace(".css", "")
-                # Create a user-friendly name from the filename
-                display_name = name.replace("_", " ").replace("default", "").strip()
-                if not display_name:
-                    display_name = "Default"
-                themes.append({"id": name, "name": display_name.title(), "path": f"/static/themes/{file}"})
-        return {"themes": sorted(themes, key=lambda x: x["name"])}
-    except Exception as e:
-        return {"themes": [{"id": "default", "name": "Default", "path": "/static/themes/default.css"}], "error": str(e)}
+    """List available themes.
+
+    Bundled themes plus any the user dropped into their data directory; a
+    user theme with the same filename shadows the bundled one, matching how
+    /static is served.
+    """
+    themes = {}
+    # Bundled first, user second, so user entries overwrite by id.
+    for theme_dir in (paths.static_dir() / "themes", paths.static_overlay("themes")):
+        try:
+            entries = os.listdir(str(theme_dir))
+        except OSError:
+            continue
+        for file in entries:
+            if not file.endswith(".css"):
+                continue
+            name = file.replace(".css", "")
+            display_name = name.replace("_", " ").replace("default", "").strip()
+            themes[name] = {
+                "id": name,
+                "name": (display_name or "Default").title(),
+                "path": f"/static/themes/{file}",
+            }
+    if not themes:
+        return {"themes": [{"id": "default", "name": "Default", "path": "/static/themes/default.css"}]}
+    return {"themes": sorted(themes.values(), key=lambda x: x["name"])}

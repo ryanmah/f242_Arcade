@@ -5,6 +5,7 @@ from typing import List, Optional
 import os
 import logging
 import mimetypes
+from fs42.fs42_server.api.player import send_player_command
 from fs42.station_manager import StationManager
 from fs42.nfo_agent import NFOAgent
 from .tmdb_helper import get_tmdb_helper
@@ -302,9 +303,6 @@ async def play_file(channel_number: int, play_request: PlayFileRequest, request:
             detail=f"File not found: {play_request.file_path}"
         )
 
-    # Get the command queue from app state
-    command_queue = request.app.state.player_command_queue
-
     # Create the command to send to the player
     command = {
         "command": "play_file",
@@ -314,8 +312,8 @@ async def play_file(channel_number: int, play_request: PlayFileRequest, request:
     try:
         logger.info(f"Sending play command for file: {play_request.file_path}")
 
-        # Put the command in the queue
-        command_queue.put(command)
+        # Queue or state bus, whichever transport is live.
+        send_player_command(request, command)
 
         logger.info(f"Successfully queued play command for: {play_request.file_path}")
 
@@ -337,9 +335,8 @@ async def send_key(channel_number: int, key_name: str, request: Request):
     allowed_keys = {"PageUp", "PageDown", "Enter"}
     if key_name not in allowed_keys:
         raise HTTPException(status_code=400, detail=f"Key must be one of: {allowed_keys}")
-    command_queue = request.app.state.player_command_queue
     try:
-        command_queue.put({"command": "web_key", "key": key_name})
+        send_player_command(request, {"command": "web_key", "key": key_name})
         return {"success": True, "key": key_name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

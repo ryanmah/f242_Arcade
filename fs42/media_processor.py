@@ -4,34 +4,7 @@ import glob
 import json
 import sys
 
-# Validate ffmpeg-python package
-try:
-    import ffmpeg
-    # Check if this is the correct ffmpeg-python package
-    if not hasattr(ffmpeg, 'probe'):
-        print("\n" + "="*70)
-        print("ERROR: Incorrect ffmpeg package detected!")
-        print("="*70)
-        print("\nYou have the wrong 'ffmpeg' package installed.")
-        print("\nThis might be because you haven't activated your virtual environment.")
-        print("Please activate the virtual environment and try again:")
-        print("  source env/bin/activate  (Linux/Mac)")
-        print("\nIf the issue persists, you need to:")
-        print("  1. Uninstall the wrong package: pip uninstall ffmpeg")
-        print("  2. Install the correct package: pip install ffmpeg-python")
-        print("="*70 + "\n")
-        sys.exit(1)
-except ImportError:
-    print("\n" + "="*70)
-    print("ERROR: ffmpeg-python package not found!")
-    print("="*70)
-    print("\nThis is likely because you haven't activated your virtual environment.")
-    print("Please activate the virtual environment and try again:")
-    print("  source env/bin/activate  (Linux/Mac)")
-    print("\nIf the virtual environment is activated, install the package:")
-    print("  pip install ffmpeg-python")
-    print("="*70 + "\n")
-    sys.exit(1)
+from fs42 import ffmpeg_tools
 
 from fs42.fluid_objects import FileRepoEntry
 from fs42 import timings
@@ -221,7 +194,7 @@ class MediaProcessor:
         """Returns (duration, error_hint). duration is -1 on failure; error_hint is a human-readable cause or None."""
         _l = logging.getLogger("MEDIA")
         try:
-            probed = ffmpeg.probe(file_name)
+            probed = ffmpeg_tools.probe(file_name)
 
             if "streams" in probed and len(probed["streams"]) and "duration" in probed["streams"][0]:
                 return float(probed["streams"][0]["duration"]), None
@@ -229,13 +202,11 @@ class MediaProcessor:
                 return float(probed['format']['duration']), None
             else:
                 return -1, None
-        except AttributeError as e:
-            # This should never happen now due to startup check, but just in case
-            _l.error(f"ffmpeg module error - you may have the wrong package installed: {e}")
-            _l.error("Please ensure you have activated the virtual environment and have ffmpeg-python installed")
-            return -1, None
-        except ffmpeg.Error as e:
-            stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
+        except ffmpeg_tools.FFmpegMissing as e:
+            _l.error(str(e))
+            return -1, "ffprobe is not available"
+        except ffmpeg_tools.FFmpegError as e:
+            stderr = e.stderr
             if 'score of 1' in stderr or 'misdetection possible' in stderr:
                 hint = "file does not appear to be a valid video — may be a corrupt or failed download"
             elif 'moov atom not found' in stderr:
@@ -453,44 +424,12 @@ class MediaProcessor:
         _l.info(f"Detecting black frames in {fname}")
 
         try:
-            # Build the ffmpeg command with blackdetect filter
-            filter_complex = (
-                ffmpeg.input(fname)
-                .filter("blackdetect", d=black_min_duration, pix_th=black_pixel_tresh, pic_th=black_ratio_thresh)
-                .output("pipe:", format="null")
+            black_midpoints = ffmpeg_tools.detect_black_frames(
+                fname,
+                min_duration=black_min_duration,
+                pixel_threshold=black_pixel_tresh,
+                ratio_threshold=black_ratio_thresh,
             )
-
-            # Actually run the command and capture its output
-            stdout, stderr = filter_complex.run(capture_stdout=True, capture_stderr=True)
-
-            # Decode and parse - collect all black frame midpoints
-            black_midpoints = []
-            for line in stderr.decode("utf-8").split("\n"):
-                if "blackdetect" in line:
-                    try:
-                        parts = line.split("]")[1].strip().split(" ")
-                        info = {}
-                        for part in parts:
-                            if ":" in part:
-                                key, value = part.split(":")
-                                info[key] = float(value)
-                        if info:
-                            if "black_start" not in info or "black_end" not in info or "black_duration" not in info:
-                                # then not a good line
-                                continue
-
-                            # Calculate middle of black frame as the break point
-                            midpoint = (info["black_start"] + info["black_end"]) / 2
-                            black_midpoints.append(midpoint)
-
-                    except IndexError:
-                        _l.debug(f"Skipping malformed line: {line}")
-                        pass
-                    except ValueError:
-                        _l.info(f"Skipping invalid data in line: {line}")
-                        pass
-                    except Exception as e:
-                        _l.info(f"An unexpected error occurred while parsing line: {line}. Error: {e}")
             _l.info(f"Found {len(black_midpoints)} black segments in {fname}")
 
             # Trim any near start and end times
@@ -532,9 +471,6 @@ class MediaProcessor:
 
     @staticmethod
     def chapter_detect(fname, base_duration):
-        import subprocess
-        import json
-
         _l = logging.getLogger("MEDIA")
 
         if base_duration < timings.MIN_5:
@@ -544,18 +480,11 @@ class MediaProcessor:
         _l.info(f"Detecting chapter markers in {fname}")
 
         try:
-            # Use ffprobe with -show_chapters to extract chapter information
-            result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_chapters", fname],
-                capture_output=True,
-                text=True,
-            )
-
-            probed = json.loads(result.stdout)
+            probed_chapters = ffmpeg_tools.probe_chapters(fname)
 
             chapters = []
-            if "chapters" in probed and len(probed["chapters"]) > 0:
-                for chapter in probed["chapters"]:
+            if len(probed_chapters) > 0:
+                for chapter in probed_chapters:
                     chapter_info = {
                         "chapter_start": float(chapter["start_time"]),
                         "chapter_end": float(chapter["end_time"]),

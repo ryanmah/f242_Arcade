@@ -6,6 +6,7 @@ import logging
 import json
 from typing import Optional, Dict, Any
 from pathlib import Path
+from fs42 import paths
 from fs42.station_manager import StationManager
 
 logger = logging.getLogger("TMDB_Helper")
@@ -15,7 +16,7 @@ TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 # Cache directory for TMDB results
-CACHE_DIR = Path("catalog/.tmdb_cache")
+CACHE_DIR = paths.cache("tmdb")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 

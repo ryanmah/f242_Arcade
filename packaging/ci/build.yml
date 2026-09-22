@@ -1,0 +1,259 @@
+name: Build
+
+on:
+  push:
+    branches: [desktop, main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 deliberately, not ubuntu-latest: PyInstaller links the
+          # build machine's glibc, and 22.04's 2.35 covers Debian 12, Ubuntu
+          # 22.04+ and Raspberry Pi OS Bookworm. 24.04's 2.39 would exclude them.
+          - os: ubuntu-22.04
+            tag: linux-x64
+            archive: tar.gz
+          - os: windows-latest
+            tag: windows-x64
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux build and test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libdbus-1-3 \
+            xvfb ffmpeg mpv p7zip-full
+
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        run: choco install -y 7zip ffmpeg innosetup
+
+      - name: Cache vendored binaries
+        uses: actions/cache@v4
+        with:
+          path: packaging/vendor
+          key: vendor-${{ matrix.tag }}-${{ hashFiles('packaging/binaries.lock.json') }}
+
+      - name: Fetch mpv and ffmpeg
+        # Every entry is pinned in packaging/binaries.lock.json; a pinned build
+        # that upstream has pruned falls back to the newest release (and says
+        # so), and the "latest" ffmpeg tags only ever warn on a moved digest.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python packaging/fetch_binaries.py --platform ${{ matrix.tag }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r install/requirements.txt -r install/requirements-build.in
+
+      - name: Unit tests
+        run: |
+          pip install pytest
+          pytest -q
+
+      - name: Self-check from source
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a python fieldstation42.py doctor
+          else
+            python fieldstation42.py doctor
+          fi
+
+      - name: Build folder distribution
+        run: pyinstaller --clean --noconfirm packaging/fieldstation42.spec -- --mode onedir --tag ${{ matrix.tag }}
+
+      - name: Smoke test folder distribution
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a python packaging/smoke_test.py "dist/FieldStation42/FieldStation42"
+          else
+            python packaging/smoke_test.py "dist/FieldStation42/FieldStation42.exe"
+          fi
+
+      - name: Menu end-to-end (Linux, live player under Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export FS42_HOME=$RUNNER_TEMP/fs42-menu
+          mkdir -p $FS42_HOME/catalog/demo/feature $FS42_HOME/catalog/retro/cartoons
+          for c in red green; do ffmpeg -y -loglevel error -f lavfi -i color=c=$c:s=320x240:d=60 -pix_fmt yuv420p $FS42_HOME/catalog/demo/feature/$c.mp4; done
+          ffmpeg -y -loglevel error -f lavfi -i color=c=orange:s=320x240:d=60 -pix_fmt yuv420p $FS42_HOME/catalog/retro/cartoons/c.mp4
+          xvfb-run -a dist/FieldStation42/FieldStation42 build -e >/dev/null
+          python - <<'PY'
+          import json, os
+          home = os.environ["FS42_HOME"]
+          conf = {"network_name": "DEMO", "channel_number": 3, "network_type": "standard", "content_dir": "catalog/demo",
+                  "schedule_increment": 0, "commercial_free": True,
+                  "day_templates": {"daily": {str(h): {"tags": ["feature"]} for h in range(24)}}}
+          for d in ("monday","tuesday","wednesday","thursday","friday","saturday","sunday"): conf[d] = "daily"
+          json.dump({"station_conf": conf}, open(f"{home}/confs/demo.json", "w"))
+          PY
+          dist/FieldStation42/FieldStation42 build --rebuild_catalog >/dev/null && dist/FieldStation42/FieldStation42 build --add_week >/dev/null
+          Xvfb :91 -screen 0 1280x720x24 & sleep 1
+          DISPLAY=:91 dist/FieldStation42/FieldStation42 > menu-run.log 2>&1 &
+          sleep 25
+          python packaging/menu_e2e.py --home $FS42_HOME --folder retro --channel 9
+          pkill -INT -f "dist/FieldStation42/FieldStation42$" || true; sleep 8
+
+      - name: Package folder distribution
+        shell: bash
+        run: |
+          VERSION=$(python -c "import fs42; print(fs42.__version__)")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          mkdir -p artifacts
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "artifacts/FieldStation42-$VERSION-${{ matrix.tag }}.zip" "./dist/FieldStation42/*"
+          else
+            tar -czf "artifacts/FieldStation42-$VERSION-${{ matrix.tag }}.tar.gz" -C dist FieldStation42
+          fi
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=$env:VERSION packaging\windows\FieldStation42.iss
+          Get-ChildItem artifacts\*setup.exe
+
+      - name: Build Linux installer
+        if: runner.os == 'Linux'
+        run: python packaging/linux/make_installer.py --dist dist/FieldStation42 --version "$VERSION"
+
+      - name: Install, check and uninstall (Linux installer in a scratch HOME)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export HOME=$RUNNER_TEMP/fs42-install-home
+          mkdir -p $HOME
+          run=$(ls artifacts/*-installer.run)
+          sh "$run" --check
+          # Terminal path.
+          sh "$run" --yes --no-steam --autostart
+          test -x $HOME/.local/share/fieldstation42/app/FieldStation42
+          test -f $HOME/.local/share/applications/fieldstation42.desktop
+          test -f $HOME/.config/autostart/fieldstation42.desktop
+          xvfb-run -a $HOME/.local/share/fieldstation42/app/FieldStation42 doctor
+          sh $HOME/.local/share/fieldstation42/app/uninstall.sh --yes --purge
+          test ! -e $HOME/.local/share/fieldstation42
+          test ! -e $HOME/.local/share/applications/fieldstation42.desktop
+          # Graphical path: the same wizard a double-click gets, on autopilot.
+          sh "$run" --extract-only $RUNNER_TEMP/fs42-payload
+          xvfb-run -a $RUNNER_TEMP/fs42-payload/FieldStation42/FieldStation42 install --payload $RUNNER_TEMP/fs42-payload --auto
+          test -x $HOME/.local/share/fieldstation42/app/FieldStation42
+          xvfb-run -a $HOME/.local/share/fieldstation42/app/FieldStation42 uninstall --auto
+          test ! -e $HOME/.local/share/fieldstation42/app
+          test ! -e $HOME/.local/share/applications/fieldstation42.desktop
+
+      - name: Build single-file executable
+        run: pyinstaller --clean --noconfirm packaging/fieldstation42.spec -- --mode onefile --tag ${{ matrix.tag }}
+
+      - name: Smoke test single-file executable
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a python packaging/smoke_test.py "dist/FieldStation42"
+            cp dist/FieldStation42 "artifacts/FieldStation42-$VERSION-${{ matrix.tag }}"
+          else
+            python packaging/smoke_test.py "dist/FieldStation42.exe"
+            cp dist/FieldStation42.exe "artifacts/FieldStation42-$VERSION-${{ matrix.tag }}.exe"
+          fi
+
+      - name: Build console variant (Windows support builds)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          FS42_CONSOLE_BUILD: "1"
+        run: |
+          pyinstaller --clean --noconfirm packaging/fieldstation42.spec -- --mode onefile --tag ${{ matrix.tag }}
+          cp dist/FieldStation42-debug.exe "artifacts/FieldStation42-$VERSION-${{ matrix.tag }}-debug.exe"
+
+      - name: Sign Windows binaries
+        # Only runs for maintainers who have configured a certificate; the
+        # build works without one, users just see SmartScreen.
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX != ''
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERT_PFX)
+          [IO.File]::WriteAllBytes("cert.pfx", $bytes)
+          Get-ChildItem artifacts/*.exe | ForEach-Object {
+            & signtool sign /f cert.pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+          }
+          Remove-Item cert.pfx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FieldStation42-${{ matrix.tag }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+
+      - name: Collect artifacts and checksums
+        run: |
+          mkdir -p release
+          find downloads -type f -exec cp {} release/ \;
+          cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## Which file do I want?
+
+            | You want | Download |
+            |---|---|
+            | **Windows** - install it like any other program | `FieldStation42-*-windows-x64-setup.exe` |
+            | **Linux / Steam Deck** - install it, with a menu entry and Steam library entry | `FieldStation42-*-linux-x64-installer.run`, then `sh FieldStation42-*-installer.run` |
+            | A single file to try, nothing installed | `FieldStation42-*-windows-x64.exe` or `FieldStation42-*-linux-x64` |
+            | A folder to unpack yourself | the `.zip` / `.tar.gz` folder build |
+            | Web-source channels | additionally the `webengine` add-on, unzipped into your data folder |
+            | To see errors on Windows | `-debug.exe`, which keeps a console open |
+
+            Everything is included - mpv, ffmpeg, Python, Qt. There is nothing
+            else to install. The single-file build unpacks itself on every
+            launch, so it starts more slowly than the installed or folder build.
+
+            Windows will show a SmartScreen warning for unsigned downloads:
+            **More info -> Run anyway**.
+
+            ---
+
+            Bundled third-party software and the corresponding source offer:
+            [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md)
+            and [packaging/binaries.lock.json](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/packaging/binaries.lock.json).

@@ -3,7 +3,6 @@ import os
 import json
 import datetime
 
-sys.path.append(os.getcwd())
 from fs42.station_manager import StationManager
 from fs42.liquid_manager import LiquidManager, ScheduleNotFound, ScheduleQueryNotInBounds
 from fs42.liquid_blocks import LiquidBlock
@@ -74,13 +73,12 @@ class ScheduleQuery:
 
 
 class GuideBuilder:
-    def __init__(
-        self, num_blocks=3, template_dir="fs42/guide_render/templates/", static_dir="fs42/guide_render/static/"
-    ):
+    def __init__(self, num_blocks=3):
         # ordered array of {"conf": station_config, "schedule": schedule}
+        # (template_dir/static_dir used to be constructor arguments pointing at
+        # fs42/guide_render/templates, a directory that does not exist and was
+        # never read.)
         self.num_blocks = num_blocks
-        self.template_dir = template_dir
-        self.static_dir = static_dir
 
     def build_view(self, normalize=True):
         view = {"rows": [], "meta": []}

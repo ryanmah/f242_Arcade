@@ -8,6 +8,8 @@ from PySide6.QtGui import QColor, QPainter, QFont, QLinearGradient, QFontMetrics
 from PySide6.QtCore import Qt, QRect
 from pathlib import Path
 
+from fs42 import platform_compat
+
 
 class SingleApplication(QApplication):
     def __init__(self, argv, key):
@@ -22,13 +24,16 @@ class SingleApplication(QApplication):
                 with open(self.lock_file, 'r') as f:
                     pid = int(f.read().strip())
 
-                # Check if process is actually running
-                try:
-                    os.kill(pid, 0)  # Doesn't kill, just checks if process exists
+                # See the note in ticker.py: os.kill(pid, 0) terminates the
+                # process on Windows instead of probing it.
+                if platform_compat.pid_alive(pid):
                     self._running = True
-                except (OSError, ProcessLookupError):
+                else:
                     # Process doesn't exist, remove stale lock file
-                    os.remove(self.lock_file)
+                    try:
+                        os.remove(self.lock_file)
+                    except OSError:
+                        pass
                     self._running = False
             except (ValueError, FileNotFoundError):
                 # Invalid lock file, remove it
@@ -240,12 +245,16 @@ def run_now_playing_app(file_path, db_path):
     sys.exit(app.exec())
 
 
+def _now_playing_entry(file_path, db_path):
+    """Module-level process target - see the note in ticker.py."""
+    run_now_playing_app(file_path, db_path)
+
+
 def run_now_playing(file_path, db_path):
     """Start the now playing overlay in a separate process"""
-    def now_playing_process():
-        run_now_playing_app(file_path, db_path)
-
-    process = multiprocessing.Process(target=now_playing_process)
+    process = multiprocessing.Process(
+        target=_now_playing_entry, args=(file_path, db_path)
+    )
     process.start()
     return process
 

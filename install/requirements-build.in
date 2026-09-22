@@ -1,0 +1,2 @@
+# Only needed to produce the distributable executable.
+pyinstaller>=6.6

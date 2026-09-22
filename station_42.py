@@ -271,16 +271,16 @@ def main():
 
     if args.limit_memory:
 
-        import resource
+        try:
+            import resource  # POSIX only - no equivalent on Windows
+        except ImportError:
+            resource = None
+            _l.warning("--limit_memory is not supported on this platform; ignoring it.")
 
         def get_memory():
-            with open('/proc/meminfo', 'r') as mem:
-                free_memory = 0
-                for i in mem:
-                    sline = i.split()
-                    if str(sline[0]) in ('MemFree:', 'Buffers:', 'Cached:'):
-                        free_memory += int(sline[1])
-            return free_memory  # KiB
+            import psutil
+
+            return int(psutil.virtual_memory().available / 1024)  # KiB
 
 
         def memory_limit(percent):
@@ -291,14 +291,15 @@ def main():
             _l.info("Reducing available memory usage.")
 
 
-        memory_percent = args.limit_memory[0]
-        if memory_percent > 1:
-            memory_percent = 1
-            _l.info("Memory percent too high. Using full memory.")
-        elif memory_percent < 0.1:
-            memory_percent = 0.1
-            _l.info("Memory percent too low. Setting to 10%.")
-        memory_limit(memory_percent)
+        if resource is not None:
+            memory_percent = args.limit_memory[0]
+            if memory_percent > 1:
+                memory_percent = 1
+                _l.info("Memory percent too high. Using full memory.")
+            elif memory_percent < 0.1:
+                memory_percent = 0.1
+                _l.info("Memory percent too low. Setting to 10%.")
+            memory_limit(memory_percent)
 
     if args.reset_chapters:
         import sqlite3

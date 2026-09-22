@@ -1,10 +1,17 @@
-import json
-from pathlib import Path
-from typing import Optional, Dict, Any
+"""What kind of thing is playing right now.
+
+The player tags every item it plays with a content type at catalog-build time,
+so this is a read of published state rather than a guess from file paths.
+State comes from the sqlite bus rather than a polled file.
+"""
+
+from typing import Any, Dict, Optional
+
+from fs42 import ipc
 
 
 class ContentType:
-    """Content type constants matching the values in play_status.socket"""
+    """Content type constants matching the values the player publishes."""
     FEATURE = "feature"
     COMMERCIAL = "commercial"
     BUMP = "bump"
@@ -17,57 +24,26 @@ class ContentType:
 
 
 class ContentClassifier:
-    """
-    Reads content type directly from play_status.socket.
+    """Reads the content type the player published with its status."""
 
-    The content type is now explicitly tagged during catalog building and
-    written to the status socket by the player, eliminating the need to
-    infer content type from file paths.
-    """
-
-    def __init__(self, socket_file: str = "runtime/play_status.socket"):
-        self.socket_file = Path(socket_file)
-
-    def _read_socket_status(self) -> Optional[Dict[str, Any]]:
-        """Read and parse the status socket JSON."""
+    def _read_status(self) -> Optional[Dict[str, Any]]:
         try:
-            with self.socket_file.open("r") as f:
-                content = f.read().strip()
-                if not content:
-                    return None
-                return json.loads(content)
-        except (FileNotFoundError, json.JSONDecodeError, Exception):
+            return ipc.get_status() or None
+        except Exception:
             return None
 
-    def classify_from_socket(self) -> str:
-        """
-        Read content type from the status socket.
-
-        Returns:
-            The content_type value from the socket, or ContentType.UNKNOWN if not available.
-        """
-        status_data = self._read_socket_status()
+    def classify_from_status(self, status: Optional[Dict[str, Any]] = None) -> str:
+        status_data = status if status is not None else self._read_status()
         if not status_data:
             return ContentType.UNKNOWN
+        return status_data.get("content_type") or ContentType.UNKNOWN
 
-        # Read content_type directly from the socket
-        content_type = status_data.get("content_type")
+    # Kept so existing callers and third-party scripts do not break.
+    classify_from_socket = classify_from_status
 
-        if content_type:
-            return content_type
+    def classify_content(self, title=None, file_path=None, network_name=None) -> str:
+        return self.classify_from_status()
 
-        # If content_type is not present (old data or error), return unknown
-        return ContentType.UNKNOWN
 
-    def classify_content(self, title: Optional[str], file_path: Optional[str],
-                        network_name: Optional[str]) -> str:
-        """
-        Deprecated: Classification is now explicit in the status socket.
-        This method is kept for backward compatibility but simply reads from the socket.
-        """
-        return self.classify_from_socket()
-
-def classify_current_content(socket_file: str = "runtime/play_status.socket") -> str:
-    classifier = ContentClassifier(socket_file)
-    return classifier.classify_from_socket()
-
+def classify_current_content(status: Optional[Dict[str, Any]] = None) -> str:
+    return ContentClassifier().classify_from_status(status)

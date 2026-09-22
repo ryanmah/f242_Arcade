@@ -185,3 +185,12 @@ hls/
 web_urls/
 
 .fuse_hidden*
+
+# Fork additions
+packaging/vendor/
+build/
+dist/
+*.spec.bak
+
+# Installer and release outputs
+artifacts/

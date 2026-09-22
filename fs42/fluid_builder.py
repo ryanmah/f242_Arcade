@@ -3,7 +3,6 @@ import sqlite3
 import sys
 import os
 
-sys.path.append(os.getcwd())
 
 from fs42.fluid_statements import FluidStatements
 from fs42.media_processor import MediaProcessor
