@@ -287,6 +287,15 @@ def delete_station(station: dict, log=None):
     return message
 
 
+def set_picture(name: str, values):
+    from fs42 import picture
+
+    def mutate(conf):
+        picture.write_to_station(conf, values)
+
+    return update_station(name, mutate)
+
+
 def set_hidden(name: str, hidden: bool):
     def mutate(conf):
         conf["hidden"] = bool(hidden)

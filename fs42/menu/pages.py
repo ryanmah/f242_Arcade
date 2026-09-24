@@ -9,6 +9,7 @@ from a keyboard, the phone remote and a gamepad alike.
 import logging
 import socket
 import threading
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,17 +35,24 @@ class Row:
     data: object = None
 
 
+# Footer legends, VCR style: one "WHAT:HOW" line each.
+HINT_LIST = "SELECT:▲ ▼ KEY\nSET   :► KEY\nEND   :◄ KEY"
+HINT_CONFIRM = "SELECT:▲ ▼ KEY\nSET   :► KEY"
+HINT_CONTINUE = "SET   :► KEY"
+HINT_TYPE = "TYPE  :KEYBOARD\nSELECT:▲ ▼ KEY\nSET   :► KEY"
+
+
 class ListPage(QWidget):
     """A vertically scrolling list of rows, painted directly."""
 
     title = ""
     subtitle = ""
-    hint = "↑↓ move   ⏎ select   ⌫ back"
+    hint = HINT_LIST
 
     def __init__(self, window):
         super().__init__(window.panel)
         self.window = window
-        self.scale = window.scale
+        self.scale = window.scale * theme.TEXT_SCALE
         self.rows = []
         self.cursor = 0
         self.scroll = 0
@@ -145,28 +153,47 @@ class ListPage(QWidget):
     # ------------------------------------------------------------- painting
 
     def row_height(self):
-        return int(56 * self.scale)
+        return int(55 * self.scale)
+
+    def _text(self, painter, rect, flags, text, colour):
+        """Text with the drop shadow a VCR burns into the picture."""
+        s = self.scale
+        if theme.SHADOW.alpha():
+            painter.setPen(theme.SHADOW)
+            painter.drawText(rect.translated(int(3 * s), int(3 * s)), flags, text)
+        painter.setPen(colour)
+        painter.drawText(rect, flags, text)
+
+    def _dashed_title(self, metrics, width):
+        title = (self.title or "MENU").upper()
+        dash = max(1, metrics.horizontalAdvance("-"))
+        room = width - metrics.horizontalAdvance(f" {title} ")
+        count = max(2, room // (2 * dash))
+        return f"{'-' * count} {title} {'-' * count}"
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing, False)
         s = self.scale
         width = self.width()
-        pad = int(28 * s)
-        y = pad
+        pad = int(36 * s)
+        line = width - 2 * pad
+        y = int(24 * s)
 
-        painter.setPen(theme.TEXT)
-        painter.setFont(theme.font(34, bold=True, scale=s))
-        painter.drawText(QRect(pad, y, width - 2 * pad, int(48 * s)), Qt.AlignLeft | Qt.AlignVCenter, self.title)
-        y += int(50 * s)
+        painter.setFont(theme.font(30, scale=s))
+        metrics = QFontMetrics(painter.font())
+        self._text(painter, QRect(pad, y, line, int(44 * s)), Qt.AlignHCenter | Qt.AlignVCenter,
+                   self._dashed_title(metrics, line), theme.TEXT)
+        y += int(52 * s)
         if self.subtitle:
-            painter.setPen(theme.MUTED)
-            painter.setFont(theme.font(18, scale=s))
-            painter.drawText(QRect(pad, y, width - 2 * pad, int(28 * s)), Qt.AlignLeft | Qt.AlignVCenter, self.subtitle)
-            y += int(32 * s)
-        y += int(10 * s)
+            painter.setFont(theme.font(20, scale=s))
+            self._text(painter, QRect(pad, y, line, int(28 * s)), Qt.AlignLeft | Qt.AlignVCenter,
+                       self.subtitle, theme.MUTED)
+            y += int(34 * s)
+        y += int(8 * s)
 
-        footer = int(70 * s)
+        hint_lines = [h for h in (self.hint or "").split("\n") if h]
+        footer = int(16 * s) + int(30 * s) + len(hint_lines) * int(30 * s)
         list_top = y
         list_bottom = self.height() - footer
         rh = self.row_height()
@@ -177,27 +204,20 @@ class ListPage(QWidget):
         elif self.cursor >= self.scroll + visible:
             self.scroll = self.cursor - visible + 1
 
-        painter.setFont(theme.font(22, scale=s))
+        painter.setFont(theme.font(26, scale=s))
         metrics = QFontMetrics(painter.font())
+        indent = int(24 * s)
         for index in range(self.scroll, min(len(self.rows), self.scroll + visible)):
             row = self.rows[index]
-            rect = QRect(pad, y, width - 2 * pad, rh - int(6 * s))
-            selected = index == self.cursor and row.action is not None
+            rect = QRect(pad, y, line, rh - int(6 * s))
+            selected = index == self.cursor and row.action is not None and row.enabled
             if selected:
+                painter.setPen(Qt.NoPen)
+                if theme.ROW_SHADOW.alpha():
+                    painter.setBrush(theme.ROW_SHADOW)
+                    painter.drawRect(rect.translated(int(4 * s), int(4 * s)))
                 painter.setBrush(theme.ROW_SELECTED)
-                painter.setPen(QPen(theme.ACCENT, max(2, int(3 * s))))
-            else:
-                painter.setBrush(theme.ROW)
-                painter.setPen(QPen(theme.BORDER, 1))
-            painter.drawRoundedRect(QRectF(rect), 8 * s, 8 * s)
-
-            text_left = rect.left() + int(18 * s)
-            if row.checked is not None:
-                box = QRect(text_left, rect.top() + (rect.height() - int(24 * s)) // 2, int(24 * s), int(24 * s))
-                painter.setPen(QPen(theme.ACCENT if row.checked else theme.MUTED, 2))
-                painter.setBrush(theme.ACCENT if row.checked else Qt.NoBrush)
-                painter.drawRoundedRect(QRectF(box), 4 * s, 4 * s)
-                text_left += int(40 * s)
+                painter.drawRect(rect)
 
             colour = {
                 "muted": theme.MUTED, "accent": theme.ACCENT, "good": theme.GOOD,
@@ -205,27 +225,38 @@ class ListPage(QWidget):
             }.get(row.tone, theme.TEXT)
             if not row.enabled:
                 colour = theme.MUTED
-            painter.setPen(colour)
-            value_width = metrics.horizontalAdvance(row.value) + int(24 * s) if row.value else 0
-            title_rect = QRect(text_left, rect.top(), rect.width() - (text_left - rect.left()) - value_width - int(12 * s), rect.height())
-            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, metrics.elidedText(row.title, Qt.ElideRight, title_rect.width()))
-            if row.value:
-                painter.setPen(theme.MUTED if row.tone == "normal" else colour)
-                painter.drawText(QRect(rect.left(), rect.top(), rect.width() - int(18 * s), rect.height()), Qt.AlignRight | Qt.AlignVCenter, row.value)
+            if selected:
+                # Knocked out of the bar, whatever the tone.
+                colour = theme.ROW_SELECTED_TEXT
+            # A VCR only had capitals.
+            title = row.title.upper()
+            value = row.value.upper()
+            if row.checked is not None:
+                title = ("[X] " if row.checked else "[ ] ") + title
+            value_width = metrics.horizontalAdvance(value) + int(24 * s) if value else 0
+            title_rect = QRect(rect.left() + indent, rect.top(), rect.width() - indent - value_width - int(12 * s), rect.height())
+            self._text(painter, title_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                       metrics.elidedText(title, Qt.ElideRight, title_rect.width()), colour)
+            if value:
+                self._text(painter, QRect(rect.left(), rect.top(), rect.width() - int(12 * s), rect.height()),
+                           Qt.AlignRight | Qt.AlignVCenter, value,
+                           colour if selected or row.tone != "normal" else theme.MUTED)
             y += rh
 
         if len(self.rows) > visible:
-            painter.setPen(theme.MUTED)
-            painter.setFont(theme.font(14, scale=s))
-            painter.drawText(QRect(pad, list_bottom - int(20 * s), width - 2 * pad, int(20 * s)), Qt.AlignRight, f"{self.cursor + 1} / {len(self.rows)}")
+            painter.setFont(theme.font(18, scale=s))
+            self._text(painter, QRect(pad, list_bottom - int(24 * s), line, int(24 * s)), Qt.AlignRight,
+                       f"{self.cursor + 1}/{len(self.rows)}", theme.MUTED)
 
-        painter.setFont(theme.font(16, scale=s))
+        painter.setFont(theme.font(22, scale=s))
+        y = self.height() - footer + int(8 * s)
         if self.message:
             colour = {"good": theme.GOOD, "warn": theme.WARN, "bad": theme.BAD, "accent": theme.ACCENT}.get(self.message_tone, theme.MUTED)
-            painter.setPen(colour)
-            painter.drawText(QRect(pad, self.height() - footer + int(6 * s), width - 2 * pad, int(28 * s)), Qt.AlignLeft | Qt.AlignVCenter, self.message)
-        painter.setPen(theme.MUTED)
-        painter.drawText(QRect(pad, self.height() - int(34 * s), width - 2 * pad, int(28 * s)), Qt.AlignLeft | Qt.AlignVCenter, self.hint)
+            self._text(painter, QRect(pad, y, line, int(30 * s)), Qt.AlignLeft | Qt.AlignVCenter, self.message.upper(), colour)
+        y += int(30 * s)
+        for text in hint_lines:
+            self._text(painter, QRect(pad, y, line, int(30 * s)), Qt.AlignLeft | Qt.AlignVCenter, text, theme.TEXT)
+            y += int(30 * s)
         painter.end()
 
 
@@ -271,23 +302,62 @@ def send_player(command: dict):
 
 # ================================================================== pages
 
+def _web_port():
+    from fs42.station_manager import StationManager
+
+    return StationManager().server_conf.get("server_port", 4242)
+
+
 class HomePage(ListPage):
-    title = "FieldStation42"
+    title = "Menu"
 
     def build_rows(self):
-        from fs42.station_manager import StationManager
-
-        port = StationManager().server_conf.get("server_port", 4242)
         status = ipc.get_status() or {}
         now = status.get("network_name") or "nothing"
-        self.subtitle = f"Now playing: {now}"
+        self.subtitle = f"NOW PLAYING: {now}"
         return [
             Row("Stations", action=lambda: self.window.push(StationsPage(self.window))),
             Row("Rebuild all catalogs", action=lambda: self.window.push(ProgressPage(self.window, "Rebuilding catalogs", lambda log: _jobs().rebuild_catalog("all", log), reload_stations=True))),
             Row("Add a week to all schedules", action=lambda: self.window.push(ProgressPage(self.window, "Adding a week", lambda log: _jobs().add_schedule_time("week", "all", log)))),
-            Row(f"Web console: http://{_lan_ip()}:{port}", value="for everything else", tone="muted"),
+            Row("Open web portal", value=f"http://{_lan_ip()}:{_web_port()}", action=self._open_web_portal),
+            Row("Add input", value="controllers", action=lambda: self.window.push(ControllersPage(self.window))),
+            Row("Video effects", value="scanlines / noise", action=lambda: self.window.push(VideoEffectsPage(self.window))),
             Row("Close menu", action=self.window.close_menu),
+            Row("Close FieldStation42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
         ]
+
+    def _open_web_portal(self):
+        """Open the web console in the default browser and get out of its way."""
+        url = f"http://localhost:{_web_port()}"
+        opened = False
+        try:
+            opened = webbrowser.open(url, new=2)
+        except Exception as e:
+            _l.warning("Could not open a browser: %s", e)
+        if opened:
+            # The menu (and the video) sit above everything; the browser is
+            # only useful once the menu is gone.
+            self.say(f"Opening {url}", "good")
+            QTimer.singleShot(600, self.window.close_menu)
+        else:
+            self.say(f"No browser found - open http://{_lan_ip()}:{_web_port()} on any device", "warn")
+
+
+class ConfirmQuitPage(ListPage):
+    title = "Close FieldStation42"
+    hint = HINT_CONFIRM
+
+    def build_rows(self):
+        self.subtitle = "STOP THE PLAYER, THE WEB CONSOLE AND THIS MENU?"
+        return [
+            Row("No - keep watching", action=self.window.pop),
+            Row("Yes - close everything", action=self._quit),
+        ]
+
+    def _quit(self):
+        self.say("Closing...", "warn")
+        ipc.request_shutdown("menu")
+        QTimer.singleShot(300, self.window.close_menu)
 
 
 def _jobs():
@@ -348,6 +418,12 @@ class StationDetailPage(ListPage):
         if station.get("_has_schedule"):
             rows.append(Row("Add a week to the schedule", action=lambda: self.window.push(ProgressPage(self.window, f"Scheduling {self.network_name}", lambda log: _jobs().add_schedule_time("week", self.network_name, log)))))
             rows.append(Row("Reset the schedule", action=lambda: self.window.push(ProgressPage(self.window, f"Resetting {self.network_name}", lambda log: _jobs().reset_schedule(self.network_name, log)))))
+        if station.get("network_type") not in ("guide", "web"):
+            from fs42 import picture
+
+            current = picture.from_station(station)
+            rows.append(Row("Picture", value=f"{current['mode'].upper()}  ZOOM {int(round(current['zoom'] * 100))}%",
+                            action=lambda: self.window.push(PicturePage(self.window, self.network_name))))
         rows.append(Row("Delete this station…", tone="bad", action=lambda: self.window.push(ConfirmDeletePage(self.window, station))))
         return rows
 
@@ -361,8 +437,116 @@ class StationDetailPage(ListPage):
         self.refresh()
 
 
+class PicturePage(ListPage):
+    """Scaling and zoom for one channel, previewed on screen as you dial."""
+
+    hint = HINT_LIST
+
+    def __init__(self, window, network_name):
+        from fs42 import picture
+        from fs42.station_manager import StationManager
+
+        self.picture = picture
+        self.network_name = network_name
+        station = StationManager().station_by_name(network_name) or {}
+        self.saved = picture.from_station(station)
+        self.values = dict(self.saved)
+        self.adjusting = None
+        self.before_adjust = None
+        super().__init__(window)
+        self.title = f"Picture - {network_name}"
+
+    def _on_screen(self):
+        status = ipc.get_status() or {}
+        return status.get("network_name") == self.network_name
+
+    def build_rows(self):
+        self.subtitle = ("CHANGES SHOW ON SCREEN AS YOU DIAL" if self._on_screen()
+                         else "TUNE TO THIS CHANNEL TO SEE CHANGES LIVE")
+        mode = self.values["mode"].upper()
+        zoom = f"{int(round(self.values['zoom'] * 100))}%"
+        rows = [
+            Row("Scaling", value=f"◄ {mode} ►" if self.adjusting == "mode" else mode,
+                action=lambda: self._start_adjust("mode"), tone="accent" if self.adjusting == "mode" else "normal"),
+            Row("Zoom", value=f"◄ {zoom} ►" if self.adjusting == "zoom" else zoom,
+                action=lambda: self._start_adjust("zoom"), tone="accent" if self.adjusting == "zoom" else "normal"),
+            Row("Back to normal", action=self._reset, enabled=self.values != {"mode": "fit", "zoom": 1.0}),
+            Row("Save", tone="good", action=self._save, enabled=self.values != self.saved),
+        ]
+        return rows
+
+    def _preview(self, values=None):
+        send_player({"command": "picture", "network_name": self.network_name,
+                     "values": self.values if values is None else values})
+        self.refresh()
+
+    def _start_adjust(self, key):
+        self.adjusting = key
+        self.before_adjust = self.values[key]
+        self.hint = HINT_ADJUST
+        self.refresh()
+        text = {"mode": "FIT = BARS  FILL = CROP EDGES  STRETCH = FILL THE SCREEN",
+                "zoom": "▲ ▼ ZOOM IN OR OUT IN 5% STEPS"}[key]
+        self.say(text, "accent")
+
+    def _step(self, direction):
+        if self.adjusting == "mode":
+            modes = self.picture.MODES
+            self.values["mode"] = modes[(modes.index(self.values["mode"]) + direction) % len(modes)]
+        else:
+            self.values["zoom"] = self.values["zoom"] + direction * self.picture.ZOOM_STEP
+        self.values = self.picture.clean(self.values)
+        self._preview()
+
+    def _finish_adjust(self, keep):
+        if not keep:
+            self.values[self.adjusting] = self.before_adjust
+        self.adjusting = None
+        self.hint = HINT_LIST
+        self._preview()
+        self.say("" if keep else "CANCELLED", "muted")
+
+    def _reset(self):
+        self.values = {"mode": "fit", "zoom": 1.0}
+        self._preview()
+        self.say("PREVIEWING - CHOOSE SAVE TO KEEP IT", "muted")
+
+    def _save(self):
+        from fs42.menu import station_forms
+
+        try:
+            station_forms.set_picture(self.network_name, self.values)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        self.saved = dict(self.values)
+        send_player({"command": "reload_stations"})
+        self.refresh()
+        self.say("SAVED FOR THIS CHANNEL", "good")
+
+    def hideEvent(self, event):
+        if self not in self.window.stack and self.values != self.saved:
+            # Leaving without saving: back to what the station config says.
+            self.values = dict(self.saved)
+            send_player({"command": "picture", "network_name": self.network_name, "values": None})
+        super().hideEvent(event)
+
+    def handle(self, action):
+        if self.adjusting:
+            if action == Action.UP.value:
+                self._step(+1)
+            elif action == Action.DOWN.value:
+                self._step(-1)
+            elif action in (Action.SELECT.value, Action.RIGHT.value):
+                self._finish_adjust(keep=True)
+            elif action in (Action.BACK.value, Action.LEFT.value):
+                self._finish_adjust(keep=False)
+            return True
+        return super().handle(action)
+
+
 class ConfirmDeletePage(ListPage):
-    hint = "⌫ back"
+    hint = HINT_CONFIRM
 
     def __init__(self, window, station):
         self.station = station
@@ -463,7 +647,7 @@ class NamePage(ListPage):
     and digit/delete actions for everyone else."""
 
     title = "Name and channel number"
-    hint = "type to edit   ↑↓ move   ⏎ continue   ⌫ back"
+    hint = HINT_TYPE
 
     def __init__(self, window, folder, kind, tags):
         from fs42.menu import station_forms
@@ -495,13 +679,14 @@ class NamePage(ListPage):
 
     def _layout_widgets(self):
         s = self.scale
-        pad = int(28 * s)
-        top = int(28 * s) + int(50 * s) + int(32 * s) + int(10 * s)
+        pad = int(36 * s)
+        # Mirrors the title/subtitle stack in ListPage.paintEvent.
+        top = int(24 * s) + int(52 * s) + int(34 * s) + int(8 * s)
         rh = self.row_height()
         w = int(self.width() * 0.5)
-        x = self.width() - pad - w - int(18 * s)
-        self.name_edit.setGeometry(x, top + int(6 * s), w, rh - int(18 * s))
-        self.number_edit.setGeometry(x, top + rh + int(6 * s), w, rh - int(18 * s))
+        x = self.width() - pad - w - int(12 * s)
+        self.name_edit.setGeometry(x, top + int(4 * s), w, rh - int(14 * s))
+        self.number_edit.setGeometry(x, top + rh + int(4 * s), w, rh - int(14 * s))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -554,6 +739,438 @@ class NamePage(ListPage):
             ))
         else:
             self.window.pop_to(StationsPage)
+
+
+# ---------------------------------------------------------- video effects
+
+HINT_ADJUST = "ADJUST:▲ ▼ KEY\nSET   :► KEY\nCANCEL:◄ KEY"
+
+
+class VideoEffectsPage(ListPage):
+    """CRT scanlines and noise, dialled in live over the menu and the video."""
+
+    title = "Video effects"
+    hint = HINT_LIST
+
+    # (key, label, step) - a step of None means "cycle through the choices".
+    FIELDS = [
+        ("scanline_opacity", "Scanlines", 0.05),
+        ("scanline_pattern", "Screen style", None),
+        ("scanline_style", "Scanline style", None),
+        ("scanline_thickness", "Scanline thickness", 1),
+        ("scanline_size", "Scanline spacing", 1),
+        ("noise_opacity", "Noise", 0.05),
+        ("noise_grain", "Noise grain", 1),
+    ]
+
+    def __init__(self, window):
+        from fs42 import video_effects
+
+        self.vfx = video_effects
+        self.saved = video_effects.load()
+        self.values = dict(self.saved)
+        self.adjusting = None
+        self.before_adjust = None
+        super().__init__(window)
+
+    # ------------------------------------------------------------ rows
+
+    def _describe(self, key):
+        value = self.values[key]
+        if key.endswith("_opacity"):
+            return "OFF" if value <= 0 else f"{int(round(value * 100))}%"
+        if key in self.vfx.CHOICES:
+            return str(value).upper()
+        if key == "scanline_size":
+            return f"EVERY {value} PX"
+        return f"{value} PX"
+
+    def build_rows(self):
+        self.subtitle = "OVER THE PICTURE AND THIS MENU"
+        rows = []
+        for key, label, _ in self.FIELDS:
+            value = self._describe(key)
+            if self.adjusting == key:
+                value = f"◄ {value} ►"
+            rows.append(Row(label, value=value, action=lambda k=key: self._start_adjust(k),
+                            tone="accent" if self.adjusting == key else "normal"))
+        rows.append(Row("Presets", value="subtle / classic / heavy / grid",
+                        action=lambda: self.window.push(EffectPresetsPage(self.window, self))))
+        rows.append(Row("Save", tone="good", action=self._save, enabled=self.values != self.saved))
+        return rows
+
+    # ---------------------------------------------------------- preview
+
+    def _preview(self):
+        self.values = self.vfx.clean(self.values)
+        try:
+            self.window.effects.apply(self.values)
+        except Exception:
+            pass
+        send_player({"command": "video_effects", "values": self.values})
+        self.refresh()
+
+    def _start_adjust(self, key):
+        self.adjusting = key
+        self.before_adjust = self.values[key]
+        self.hint = HINT_ADJUST
+        self.refresh()
+        self.say("▲ ▼ TO DIAL IT IN - YOU CAN SEE IT CHANGE", "accent")
+
+    def _step(self, direction):
+        key = self.adjusting
+        step = dict((k, s) for k, _, s in self.FIELDS)[key]
+        if step is None:
+            options = self.vfx.CHOICES[key]
+            index = options.index(self.values[key]) if self.values[key] in options else 0
+            self.values[key] = options[(index + direction) % len(options)]
+        else:
+            low, high = self.vfx.LIMITS[key]
+            self.values[key] = max(low, min(high, round(self.values[key] + direction * step, 3)))
+        self._preview()
+
+    def _finish_adjust(self, keep):
+        if not keep:
+            self.values[self.adjusting] = self.before_adjust
+        self.adjusting = None
+        self.hint = HINT_LIST
+        self._preview()
+        self.say("" if keep else "CANCELLED", "muted")
+
+    def apply_preset(self, preset):
+        self.values.update(preset)
+        self._preview()
+        self.say("PREVIEWING - CHOOSE SAVE TO KEEP IT", "muted")
+
+    # Kept for older callers and tests.
+    _apply_preset = apply_preset
+
+    def _save(self):
+        try:
+            self.saved = self.vfx.save(self.values)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        self.values = dict(self.saved)
+        self.refresh()
+        self.say("SAVED", "good")
+
+    def hideEvent(self, event):
+        # Leaving the page without saving puts things back - but not when it
+        # is only hidden under the presets page, which is still in the stack.
+        if self not in self.window.stack and self.values != self.saved:
+            self.values = dict(self.saved)
+            self._preview()
+        super().hideEvent(event)
+
+    def handle(self, action):
+        if self.adjusting:
+            if action == Action.UP.value:
+                self._step(+1)
+            elif action == Action.DOWN.value:
+                self._step(-1)
+            elif action in (Action.SELECT.value, Action.RIGHT.value):
+                self._finish_adjust(keep=True)
+            elif action in (Action.BACK.value, Action.LEFT.value):
+                self._finish_adjust(keep=False)
+            return True
+        return super().handle(action)
+
+
+class EffectPresetsPage(ListPage):
+    title = "Presets"
+    hint = HINT_LIST
+
+    PRESETS = [
+        ("Subtle CRT", {"scanline_opacity": 0.35, "scanline_pattern": "horizontal", "scanline_style": "soft",
+                        "scanline_thickness": 1, "scanline_size": 3, "noise_opacity": 0.06, "noise_grain": 1}),
+        ("Classic CRT", {"scanline_opacity": 0.55, "scanline_pattern": "horizontal", "scanline_style": "medium",
+                         "scanline_thickness": 2, "scanline_size": 4, "noise_opacity": 0.1, "noise_grain": 2}),
+        ("Heavy CRT", {"scanline_opacity": 0.75, "scanline_pattern": "horizontal", "scanline_style": "hard",
+                       "scanline_thickness": 3, "scanline_size": 6, "noise_opacity": 0.18, "noise_grain": 2}),
+        ("Arcade monitor", {"scanline_opacity": 0.5, "scanline_pattern": "grid", "scanline_style": "medium",
+                            "scanline_thickness": 1, "scanline_size": 4, "noise_opacity": 0.05, "noise_grain": 1}),
+        ("Off", {"scanline_opacity": 0.0, "noise_opacity": 0.0}),
+    ]
+
+    def __init__(self, window, parent_page):
+        self.parent_page = parent_page
+        super().__init__(window)
+
+    def build_rows(self):
+        self.subtitle = "PICK ONE, THEN SAVE ON THE PREVIOUS PAGE"
+        return [Row(label, action=lambda p=preset: self._pick(p)) for label, preset in self.PRESETS]
+
+    def _pick(self, preset):
+        self.parent_page.apply_preset(preset)
+        self.window.pop()
+
+
+# -------------------------------------------------------------- add input
+
+class ControllersPage(ListPage):
+    """The controllers that have been set up, and a way to add another."""
+
+    title = "Add input"
+    hint = HINT_LIST
+
+    def __init__(self, window):
+        from fs42.menu import gamepad
+
+        self.gamepad = gamepad
+        super().__init__(window)
+
+    def build_rows(self):
+        controllers = self.gamepad.load_controllers()
+        self.subtitle = ("EACH CONTROLLER HAS ITS OWN BUTTON LAYOUT" if controllers
+                         else "NO CONTROLLERS SET UP YET")
+        rows = []
+        for index, entry in enumerate(controllers):
+            device = "" if entry["device"] == self.gamepad.ANY_DEVICE else entry["device"]
+            rows.append(Row(entry["name"], value=device,
+                            action=lambda i=index: self.window.push(InputPage(self.window, controller_index=i))))
+        rows.append(Row("+  Add a controller", tone="good",
+                        action=lambda: self.window.push(InputPage(self.window))))
+        return rows
+
+
+class InputPage(ListPage):
+    """Learn which button on one controller does what.
+
+    The page runs its own gamepad reader in *raw* mode: every newly pressed
+    control arrives with the name of the device it came from.  A new
+    controller is identified by the first button pressed on it; after that
+    only presses from that device count.  Selecting a function then pressing
+    a button assigns it; "Map every button" walks through all of them in
+    order.  The player's own reader is muted meanwhile (KEY_INPUT_CAPTURE)
+    so the press being learned does not also move the cursor.
+    """
+
+    title = "Controller"
+    hint = HINT_LIST
+
+    def __init__(self, window, controller_index=None):
+        from fs42.menu import gamepad
+
+        self.gamepad = gamepad
+        self.controllers = gamepad.load_controllers()
+        self.index = controller_index if controller_index is not None and controller_index < len(self.controllers) else None
+        if self.index is None:
+            self.entry = {"name": "", "device": "", "map": {}}
+        else:
+            self.entry = dict(self.controllers[self.index])
+            self.entry["map"] = dict(self.entry["map"])
+        self.capturing = None       # function being learned, or None
+        self.queue = []             # functions still to learn in "map every button"
+        self.pending = []           # (device, control) from the reader thread
+        self.lock = threading.Lock()
+        self.reader = None
+        self.confirm_delete = False
+        super().__init__(window)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(80)
+        self._listen(True)
+
+    # ----------------------------------------------------------- reader
+
+    @property
+    def is_new(self):
+        return self.index is None
+
+    @property
+    def device_known(self):
+        return bool(self.entry["device"])
+
+    def _listen(self, on: bool):
+        try:
+            ipc.set_state(ipc.KEY_INPUT_CAPTURE, bool(on))
+        except Exception:
+            pass
+        if on and self.reader is None:
+            self.reader = self.gamepad.GamepadReader(mapping=self.gamepad.MappingTable([]), raw_sink=self._raw)
+            self.reader.start()
+        elif not on and self.reader is not None:
+            reader, self.reader = self.reader, None
+            threading.Thread(target=reader.stop, daemon=True).start()
+
+    def _raw(self, device, control):
+        # Reader thread: hand the press to the Qt thread via the timer.
+        with self.lock:
+            self.pending.append((device, control))
+
+    def hideEvent(self, event):
+        self._listen(False)
+        super().hideEvent(event)
+
+    def on_show(self):
+        self._listen(True)
+        super().on_show()
+
+    # ------------------------------------------------------------ rows
+
+    def build_rows(self):
+        effective = self.gamepad.apply_custom(self.gamepad.default_mapping(), self.entry["map"])
+        if not self.device_known:
+            self.title = "New controller"
+            self.subtitle = "PRESS ANY BUTTON ON THE CONTROLLER TO ADD"
+        else:
+            self.title = self.entry["name"] or "Controller"
+            plugged = self.reader is not None and self.entry["device"] in (self.reader.devices or [])
+            self.subtitle = self.entry["device"].upper() + (" - CONNECTED" if plugged else " - NOT CONNECTED")
+        rows = []
+        for function, label in self.gamepad.FUNCTIONS:
+            controls = self.gamepad.controls_for(effective, function)
+            value = "  ".join(self.gamepad.describe_control(c) for c in controls) or "---"
+            if self.capturing == function:
+                value = "PRESS A BUTTON..."
+            rows.append(Row(label, value=value, action=lambda f=function: self._capture(f),
+                            enabled=self.device_known,
+                            tone="accent" if self.capturing == function else "normal"))
+        rows.append(Row("Map every button in order", action=self._map_all, enabled=self.device_known))
+        rows.append(Row("Back to defaults", action=self._reset, enabled=bool(self.entry["map"])))
+        rows.append(Row("Save", tone="good", action=self._save, enabled=self.device_known))
+        if not self.device_known:
+            rows.append(Row("Cancel", action=self.window.pop))
+        if not self.is_new:
+            if self.confirm_delete:
+                rows.append(Row("Really delete this controller?", tone="bad", action=self._delete))
+            else:
+                rows.append(Row("Delete this controller", tone="bad", action=self._ask_delete))
+        return rows
+
+    def _capture(self, function):
+        self.capturing = function
+        self.refresh()
+        label = dict(self.gamepad.FUNCTIONS)[function].upper()
+        self.say(f"PRESS THE BUTTON FOR {label}  (◄ CANCELS)", "accent")
+
+    def _map_all(self):
+        self.queue = list(self.gamepad.FUNCTION_NAMES)
+        self.entry["map"] = {}
+        self._next_in_queue()
+
+    def _next_in_queue(self):
+        if self.queue:
+            function = self.queue.pop(0)
+            self.cursor = self.gamepad.FUNCTION_NAMES.index(function)
+            self._capture(function)
+        else:
+            self.capturing = None
+            self.refresh()
+            self.cursor = next(i for i, r in enumerate(self.rows) if r.title == "Save")
+            self.update()
+            self.publish()
+            self.say("ALL SET - CHOOSE SAVE TO KEEP IT", "good")
+
+    def _assign(self, control):
+        function = self.capturing
+        # One function, one button: drop what used to point at it.
+        self.entry["map"] = {c: a for c, a in self.entry["map"].items() if a != function}
+        self.entry["map"][control] = function
+        self.capturing = None
+        label = dict(self.gamepad.FUNCTIONS)[function].upper()
+        self.refresh()
+        self.say(f"{self.gamepad.describe_control(control)} = {label}", "good")
+        if self.queue:
+            QTimer.singleShot(500, self._next_in_queue)
+        elif self.cursor < len(self.gamepad.FUNCTIONS) - 1:
+            self.move(+1)
+
+    def _adopt_device(self, device):
+        self.entry["device"] = device
+        if not self.entry["name"]:
+            self.entry["name"] = device
+        existing = self.gamepad.controller_for(device, [c for c in self.controllers if c["device"] == device])
+        if existing is not None:
+            # This device already has an entry: edit that one rather than
+            # making a second which would never be used.
+            self.index = self.controllers.index(existing)
+            self.entry = {"name": existing["name"], "device": device, "map": dict(existing["map"])}
+            self.refresh()
+            self.say(f"{device.upper()} IS ALREADY SET UP - EDITING IT", "warn")
+        else:
+            self.refresh()
+            self.say(f"ADDED {device.upper()} - NOW SET ITS BUTTONS", "good")
+        self.cursor = 0
+        self.update()
+        self.publish()
+
+    def _poll(self):
+        with self.lock:
+            presses, self.pending = self.pending, []
+        if self.reader is not None and self.device_known:
+            plugged = self.entry["device"] in (self.reader.devices or [])
+            if ("- CONNECTED" in self.subtitle) != plugged:
+                self.refresh()
+        for device, control in presses:
+            if not self.device_known:
+                self._adopt_device(device)
+                continue
+            if device != self.entry["device"]:
+                self.say(f"THAT IS A DIFFERENT CONTROLLER ({device.upper()})", "warn")
+                continue
+            if self.capturing:
+                self._assign(control)
+            else:
+                effective = self.gamepad.apply_custom(self.gamepad.default_mapping(), self.entry["map"])
+                function = effective.get(control)
+                label = dict(self.gamepad.FUNCTIONS).get(function, "NOT ASSIGNED").upper()
+                self.say(f"{self.gamepad.describe_control(control)} = {label}", "muted")
+
+    def _reset(self):
+        self.entry["map"] = {}
+        self.queue = []
+        self.capturing = None
+        self.refresh()
+        self.say("DEFAULT LAYOUT - CHOOSE SAVE TO KEEP IT", "muted")
+
+    def _save(self):
+        controllers = list(self.controllers)
+        if self.index is None:
+            controllers.append(self.entry)
+        else:
+            controllers[self.index] = self.entry
+        try:
+            self.gamepad.save_controllers(controllers)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        send_player({"command": "reload_input"})
+        self.say("SAVED - CONTROLLER IS ON", "good")
+        QTimer.singleShot(700, self.window.pop)
+
+    def _ask_delete(self):
+        self.confirm_delete = True
+        self.refresh()
+        self.say("SELECT AGAIN TO DELETE, OR ◄ TO KEEP IT", "warn")
+
+    def _delete(self):
+        controllers = [c for i, c in enumerate(self.controllers) if i != self.index]
+        try:
+            self.gamepad.save_controllers(controllers)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        send_player({"command": "reload_input"})
+        self.say("DELETED", "warn")
+        QTimer.singleShot(500, self.window.pop)
+
+    def handle(self, action):
+        if self.capturing:
+            if action in (Action.BACK.value, Action.LEFT.value):
+                self.capturing = None
+                self.queue = []
+                self.refresh()
+                self.say("CANCELLED", "muted")
+            return True
+        if self.confirm_delete and action in (Action.BACK.value, Action.LEFT.value, Action.UP.value, Action.DOWN.value):
+            self.confirm_delete = False
+            self.refresh()
+            if action in (Action.BACK.value, Action.LEFT.value):
+                self.say("KEPT", "muted")
+                return True
+        return super().handle(action)
 
 
 # ---------------------------------------------------------------- progress
@@ -609,7 +1226,7 @@ class ProgressPage(ListPage):
         self.done = True
         self.ok = ok
         self.subtitle = "Finished" if ok else f"Failed: {error}"
-        self.hint = "⏎ continue"
+        self.hint = HINT_CONTINUE
         # The menu process built it; tell the player so it sees the result.
         from fs42.liquid_manager import LiquidManager
 

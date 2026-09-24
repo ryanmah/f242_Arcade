@@ -470,6 +470,19 @@ class LiquidSchedule:
         current_end = self._end_time()
         start_building = None
         end_building = None
+        today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if current_end and current_end < today:
+            # The schedule ended in the past - typically one built on another
+            # machine or months ago and carried over on an external drive.
+            # Continuing from its end would never reach today, so start
+            # over from this morning.
+            self._l.warning(
+                f"Schedule for {self.conf['network_name']} ended {current_end:%Y-%m-%d %H:%M}, "
+                "which is in the past - discarding it and scheduling from today"
+            )
+            LiquidAPI.delete_blocks(self.conf)
+            self._blocks = []
+            current_end = None
         if current_end:
             # then there is an existing schedule
             start_building = current_end

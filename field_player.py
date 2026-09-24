@@ -84,6 +84,15 @@ def _handle_player_command(q_message):
             return PlayerOutcome(PlayerState.SUCCESS, f"mpv_command:{action}")
         case "menu":
             return PlayerOutcome(PlayerState.SUCCESS, "menu:open")
+        case "reload_input":
+            return PlayerOutcome(PlayerState.SUCCESS, "input:reload")
+        case "picture":
+            return PlayerOutcome(PlayerState.SUCCESS, "picture:" + json.dumps(
+                {"network_name": q_message.get("network_name"), "values": q_message.get("values")}))
+        case "video_effects":
+            # None -> re-read the saved settings; a dict -> preview these.
+            values = q_message.get("values")
+            return PlayerOutcome(PlayerState.SUCCESS, "video_effects:" + json.dumps(values))
         case "reload_stations":
             return PlayerOutcome(PlayerState.RELOAD_STATIONS)
         case "tune":
@@ -130,6 +139,49 @@ def input_check():
     return None
 
 
+NO_CHANNELS_STATION = {
+    "network_name": "",
+    "channel_number": 0,
+    "network_type": "standard",
+    "hidden": False,
+}
+
+NO_CHANNELS_HINT = "No channels yet.  Click this window, then press Escape (or MENU on the phone remote) to add one from a folder of videos."
+
+
+def _wait_for_first_channel(player, manager, logger):
+    """Loop static with a hint until a station exists.
+
+    Returns None once at least one station is configured, or a reason string
+    if the player was asked to exit meanwhile.
+    """
+    static = str(paths.runtime("static.mp4"))
+    update_status_socket("no_channels", "", -1)
+    while True:
+        try:
+            player.show_text(NO_CHANNELS_HINT, 3_600_000)
+        except Exception:
+            pass
+        outcome = player.play_and_wait(static)
+        if outcome is None:
+            continue
+        if outcome.status == PlayerState.EXIT_COMMAND:
+            return "exit command"
+        if outcome.status == PlayerState.RELOAD_STATIONS:
+            try:
+                player.reload_stations()
+            except Exception as e:
+                logger.exception(e)
+        if len(manager.stations):
+            try:
+                player.show_text("", 1)
+            except Exception:
+                pass
+            logger.info("First channel configured - starting normal playback")
+            return None
+        # Channel changes and tunes mean nothing yet; keep waiting.
+
+
 def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=None):
     manager = StationManager()
     reception = ReceptionStatus()
@@ -145,17 +197,13 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     else:
         logger.info("Live schedule agent is not configured")
 
-    if not len(manager.stations):
-        logger.error(
-            "Could not find any station runtimes - do you have your channels configured?"
-        )
-        logger.error(
-            "Check to make sure you have valid json configurations in the confs dir"
-        )
-        logger.error(
-            "The confs/examples folder contains working examples that you can build off of - just move one into confs/"
-        )
-        return
+    # A fresh install has no channels.  Upstream exits here (and under the
+    # supervisor that meant a window flashing every few seconds); instead,
+    # sit on static with a hint and keep the menu available so the first
+    # channel can be added without leaving the TV.
+    no_channels = not len(manager.stations)
+    if no_channels:
+        logger.warning("No channels configured yet - waiting on static; press Escape to add one")
 
     channel_index = 0
     # if they specified a start channel, just use that
@@ -175,7 +223,8 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
         logger.warning("Saved channel index %d is out of range, resetting to 0", channel_index)
         channel_index = 0
 
-    player = StationPlayer(manager.stations[channel_index], input_check)
+    first_station = manager.stations[channel_index] if not no_channels else NO_CHANNELS_STATION
+    player = StationPlayer(first_station, input_check)
     if schedule_lock:
         player.schedule_lock = schedule_lock
     player.attach_osd()
@@ -204,6 +253,15 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     # the process can return an exit code the supervisor can act on instead of
     # calling exit() from inside a signal frame.
     platform_compat.install_shutdown_handlers(lambda signum: request_exit())
+
+    if no_channels:
+        outcome = _wait_for_first_channel(player, manager, logger)
+        if outcome is not None:
+            graceful_exit(outcome)
+            return 0
+        channel_index = 0
+        ipc.set_state(ipc.KEY_CHANNEL_INDEX, 0)
+        player.station_config = manager.stations[0]
 
     channel_conf = manager.stations[channel_index]
 
@@ -330,9 +388,12 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
                 logger.exception(e)
                 logger.error("Station reload failed; keeping the previous station list")
             if not len(manager.stations):
-                logger.error("All stations were removed; stopping")
-                graceful_exit("no stations")
-                return 0
+                logger.warning("All stations were removed; waiting on static until one is added")
+                reason = _wait_for_first_channel(player, manager, logger)
+                if reason is not None:
+                    graceful_exit(reason)
+                    return 0
+                current_number = manager.stations[0]["channel_number"]
             new_index = manager.index_from_channel(current_number)
             if new_index is None:
                 logger.warning("Current channel %s no longer exists; tuning to the first station", current_number)

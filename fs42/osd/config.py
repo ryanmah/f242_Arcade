@@ -36,8 +36,12 @@ class StatusDisplayConfig(BaseModel):
     text_color: tuple[int, int, int, int] = (0, 255, 0, 200)
     font_size: int = 40
     expansion_factor: float = 1.0
-    font: str | None = None
-    x_margin: float = 0.1
+    # A font family name, or a font file whose base name is the family.  The
+    # default is the menu's VCR face, which the player hands to mpv.
+    font: str | None = "VCR OSD Mono"
+    # 0.12 sits the channel banner a fifth further in from the side than
+    # upstream's 0.1, clear of the curve of a CRT or a TV's overscan.
+    x_margin: float = 0.12
     y_margin: float = 0.1
     delay: float = 0.0
 

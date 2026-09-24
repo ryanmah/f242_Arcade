@@ -28,6 +28,7 @@ def _build_window():
     from fs42.menu import theme
     from fs42.menu.input import Action, qt_key_to_action
     from fs42.menu.pages import HomePage
+    from fs42.menu.effects import EffectsOverlay
 
     class MenuWindow(QWidget):
         def __init__(self):
@@ -38,11 +39,14 @@ def _build_window():
             screen = QApplication.primaryScreen().geometry()
             self.setGeometry(screen)
             self.scale = theme.scale_for(screen.height())
-            self.setStyleSheet(theme.stylesheet(self.scale))
+            theme.load_fonts()
+            self.setStyleSheet(theme.stylesheet(self.scale * theme.TEXT_SCALE))
 
+            # The "screen" of the VCR: a centred column of text with the
+            # generous margins a CRT's overscan would have needed.
             self.panel = QWidget(self)
-            width = int(min(screen.width() * 0.62, 1300 * self.scale))
-            height = int(min(screen.height() * 0.84, 980 * self.scale))
+            width = int(min(screen.width() * 0.74, 1440 * self.scale))
+            height = int(min(screen.height() * 0.93, 1040 * self.scale))
             self.panel.setGeometry((screen.width() - width) // 2, (screen.height() - height) // 2, width, height)
 
             # Anything queued before this window existed was aimed at a menu
@@ -51,6 +55,11 @@ def _build_window():
             # remote treats a published page as "ready for input".
             while ipc.pop(ipc.TOPIC_MENU_INPUT, "menu"):
                 pass
+
+            # CRT scanlines and noise over the whole menu, matching what the
+            # player puts over the video.
+            self.effects = EffectsOverlay(self)
+            self.effects.setGeometry(self.rect())
 
             self.stack = []
             self.push(HomePage(self))
@@ -72,6 +81,7 @@ def _build_window():
             self.stack.append(page)
             page.on_show()
             page.show()
+            self.effects.raise_()
 
         def replace(self, page):
             if self.stack:
@@ -138,13 +148,9 @@ def _build_window():
         # --------------------------------------------------------- painting
 
         def paintEvent(self, event):
+            # One flat VCR blue over the whole picture; no panel outline.
             painter = QPainter(self)
             painter.fillRect(self.rect(), theme.BACKDROP)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(theme.BORDER)
-            painter.setBrush(theme.PANEL)
-            rect = self.panel.geometry().adjusted(-2, -2, 2, 2)
-            painter.drawRoundedRect(rect, 14 * self.scale, 14 * self.scale)
             painter.end()
 
     return MenuWindow
@@ -172,6 +178,7 @@ def run_menu_app() -> int:
         return app.exec()
     finally:
         ipc.set_state(ipc.KEY_MENU_OPEN, False)
+        ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
 
 
 def _menu_entry():

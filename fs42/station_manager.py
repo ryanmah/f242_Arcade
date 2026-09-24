@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from fs42 import paths
 from fs42.slot_reader import SlotReader
 from fs42.station_io import StationIO
@@ -52,6 +53,23 @@ class StationManager(object):
                     "menu_drop_fullscreen": False,
                     # Poll a gamepad for menu navigation and channel changes.
                     "gamepad": False,
+                    # Read the head and tail of what each channel plays next
+                    # so the first tune to it is as quick as the second.
+                    "prewarm_media": True,
+                    # Keep every schedule at least a day ahead, building a
+                    # week at a time in the background (upstream leaves this
+                    # unset, so a schedule that runs out is only rebuilt when
+                    # you tune to that channel).  Set to null to turn off.
+                    "schedule_agent": {"amount_to_add": "week", "trigger_add_at": "day"},
+                    # Controllers set up on the menu's Add Input pages, each
+                    # with its own button map (see fs42/menu/gamepad.py).
+                    # "gamepad_map" is the older single flat map.
+                    "controllers": [],
+                    "gamepad_map": {},
+                    # CRT scanlines and noise over the video and the menu
+                    # (see fs42/video_effects.py); set from the menu.
+                    "video_effects": {"scanline_opacity": 0.0, "scanline_size": 3,
+                                      "noise_opacity": 0.0, "noise_grain": 2},
                 }
                 self._number_index = {}
                 self._name_index = {}
@@ -79,11 +97,13 @@ class StationManager(object):
                     gconf = GuideWindowConf()
                     errors = gconf.check_config(station)
                     if len(errors):
-                        logging.getLogger().error("Errors found in Guide Channel configuration:")
+                        # Missing artwork or sound is not worth taking the
+                        # whole station down for; the guide skips what it
+                        # cannot load.  Say so loudly and carry on.
+                        logging.getLogger().warning("Problems in the guide channel configuration (%s):", station.get("network_name"))
                         for err in errors:
-                            logging.getLogger().error(err)
-                        logging.getLogger().error("Please check your configuration and try agian.")
-                        exit(-1)
+                            logging.getLogger().warning("  %s", err)
+                        station["_guide_problems"] = list(errors)
                     else:
                         logging.getLogger().info("Guide channel checks completed.")
                 elif station["network_type"] == "web":
@@ -143,6 +163,10 @@ class StationManager(object):
                     # in-app menu
                     "menu_drop_fullscreen",
                     "gamepad",
+                    "gamepad_map",
+                    "controllers",
+                    "video_effects",
+                    "prewarm_media",
                     "volume_step",
                 ]
 
@@ -218,7 +242,7 @@ class StationManager(object):
                 print(e)
                 _l.exception(e)
                 _l.error(f"Error loading main config overrides from {self.station_io.main_config_path}")
-                exit(-1)
+                sys.exit(-1)
         # else: skip, no overrides (title_patterns already initialized to [] in __init__)
 
     def load_json_stations(self):
@@ -241,7 +265,7 @@ class StationManager(object):
             _l.error("Error loading station configurations")
             _l.exception(e)
             _l.error("*" * 60)
-            exit(-1)
+            sys.exit(-1)
 
     def _build_indexes(self):
         """Build name and channel number indexes for fast lookup."""

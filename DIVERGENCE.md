@@ -22,7 +22,7 @@ upstream files are one-line substitutions wherever possible.
 | `fs42/osd/backends/` | On-screen display rendered by mpv. |
 | `fs42/osd/config.py`, `fs42/osd/logo_selector.py` | The configuration models and logo-selection logic, extracted from the GLFW implementation. |
 | `fs42/fs42_server/overlay_static.py` | Serves bundled and user-supplied web assets from one mount. |
-| `fs42/menu/` | The on-screen channel menu (Escape): a Qt window in its own process, driven by keyboard, the phone remote's D-pad, or a gamepad, all through the state bus. |
+| `fs42/menu/` | The on-screen channel menu (Escape): a Qt window in its own process, driven by keyboard, the phone remote's D-pad, or a gamepad, all through the state bus. Drawn as a VCR on-screen display with the bundled VCR OSD Mono font (`fs42/menu/fonts/`). Includes the *Add input* controller-mapping page and *Open web portal* / *Close FieldStation42* entries. |
 | `fs42/build_jobs.py` | Catalog/schedule jobs shared by the web console's build endpoints and the menu. |
 | `packaging/menu_e2e.py` | Drives the menu over HTTP against a live player and checks what the player did. |
 | `packaging/` | PyInstaller spec, runtime hook, binary fetcher, smoke tests. |

@@ -43,6 +43,7 @@ KEY_STATUS = "player_status"
 KEY_VOLUME = "volume"
 KEY_CHANNEL_INDEX = "channel_index"
 KEY_SHUTDOWN = "shutdown_requested"
+KEY_RESTART = "restart_requested"
 
 TOPIC_CHANNEL = "channel"
 TOPIC_PLAYER_CMD = "player_cmd"
@@ -53,6 +54,9 @@ TOPIC_MENU_INPUT = "menu_input"
 # Set by the player while its menu process is alive, so key bindings know
 # whether to forward keys or ignore them.
 KEY_MENU_OPEN = "menu_open"
+# True while the menu's Add Input page is learning buttons; the player's
+# gamepad reader stays quiet so a press being mapped does not also navigate.
+KEY_INPUT_CAPTURE = "input_capture"
 # What the menu is showing right now: {"title", "subtitle", "cursor", "rows": [...]}.
 # Lets the phone remote mirror the on-screen menu, and lets tests see it.
 KEY_MENU_PAGE = "menu_page"
@@ -376,6 +380,26 @@ def pending_count(topic: str = None) -> int:
 # --------------------------------------------------------------------------
 # Shutdown coordination
 # --------------------------------------------------------------------------
+
+def request_restart(reason: str = "requested"):
+    """Ask the supervisor to stop every component and start them again.
+
+    Used after changing something only a fresh process picks up, such as the
+    data folder.
+    """
+    set_state(KEY_RESTART, {"reason": reason, "at": time.time()})
+
+
+def restart_requested():
+    return get_state(KEY_RESTART)
+
+
+def clear_restart():
+    try:
+        _connect().execute("DELETE FROM kv WHERE key = ?", (KEY_RESTART,))
+    except sqlite3.Error:
+        pass
+
 
 def request_shutdown(reason: str = "requested"):
     set_state(KEY_SHUTDOWN, {"reason": reason, "at": time.time()})

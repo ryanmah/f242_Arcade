@@ -99,7 +99,10 @@ def _mount_static():
 
 def _serve():
     conf = StationManager().server_conf
-    uvicorn.run(fapi, host=conf["server_host"], port=conf["server_port"])
+    # log_config=None: uvicorn's default config builds a colour formatter
+    # that probes sys.stdout.isatty(), which the windowed Windows build does
+    # not have.  Our own logging setup (cli._configure_logging) applies.
+    uvicorn.run(fapi, host=conf["server_host"], port=conf["server_port"], log_config=None)
 
 
 def run_with_shutdown_queue(shutdown_queue, command_queue):

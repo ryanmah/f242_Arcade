@@ -12,6 +12,7 @@ not to FieldStation42's own code.
 | ffmpeg / ffprobe | GPL v3 | https://ffmpeg.org/ |
 | Qt (via PySide6) | LGPL v3 | https://www.qt.io/ |
 | Python | PSF License | https://www.python.org/ |
+| VCR OSD Mono (menu font) | Freeware, free for personal and commercial use | https://www.dafont.com/vcr-osd-mono.font (Riciery Leal) |
 
 The mpv and ffmpeg executables are unmodified releases of these community
 build projects:

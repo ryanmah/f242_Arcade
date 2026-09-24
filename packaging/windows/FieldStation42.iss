@@ -44,14 +44,34 @@ DisableProgramGroupPage=yes
 LicenseFile=..\..\LICENSE
 InfoAfterFile=after-install.txt
 OutputDir={#OutputDir}
+#ifdef SplitForTransfer
+; A stable name, so a newer build dropped into the same folder replaces the
+; old one file-for-file.
+OutputBaseFilename={#AppName}-setup
+#else
 OutputBaseFilename={#AppName}-{#AppVersion}-windows-x64-setup
+#endif
 SetupIconFile=..\..\fs42\fs42_server\static\favicon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
-Compression=lzma2/ultra64
 SolidCompression=yes
+#ifdef NoSeparateLzma
+; Compiling under a 32-bit Wine prefix: the 64-bit compressor helper cannot
+; run there and the in-process compressor has a 32-bit address space, so
+; keep the dictionary and thread count modest.  Pass /DNoSeparateLzma.
+Compression=lzma2/max
+LZMANumBlockThreads=1
+#else
+Compression=lzma2/ultra64
 LZMAUseSeparateProcess=yes
 LZMANumBlockThreads=4
+#endif
+#ifdef SplitForTransfer
+; Produce setup.exe plus setup-N.bin slices small enough for transfers with
+; a per-file size cap; Setup reads the slices from its own folder.
+DiskSpanning=yes
+DiskSliceSize=19000000
+#endif
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

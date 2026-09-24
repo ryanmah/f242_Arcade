@@ -10,6 +10,29 @@ from fs42.guide_builder import GuideBuilder
 from fs42.station_manager import StationManager
 
 
+def _locate_guide_file(value):
+    """Resolve a guide image/sound path: data folder first, then the bundle."""
+    from fs42 import paths
+
+    resolved = paths.resolve_user_path(value)
+    if resolved is None:
+        return value
+    if resolved.exists():
+        return resolved
+    raw = str(value).replace("\\", "/").lstrip("./")
+    if not os.path.isabs(str(value)):
+        bundled = paths.resources(*raw.split("/"))
+        if bundled.exists():
+            return bundled
+        # "docs/logo_images/x.png" from an upstream checkout is seeded into
+        # runtime/logo_images on first run.
+        if raw.startswith("docs/"):
+            seeded = paths.runtime(*raw.split("/")[1:])
+            if seeded.exists():
+                return seeded
+    return resolved
+
+
 class GuideWindowConf:
     def __init__(self, w=720, h=480):
         self.fullscreen = True
@@ -103,6 +126,15 @@ class GuideWindowConf:
         for key in to_merge:
             if hasattr(self, key):
                 setattr(self, key, to_merge[key])
+        # Relative image and sound paths are relative to the data folder,
+        # wherever that is (an external drive, say), not to the working
+        # directory; upstream-style "docs/..." paths fall back to the copies
+        # bundled with the application.
+        self.images = [str(_locate_guide_file(p)) for p in (self.images or [])]
+        if isinstance(self.sound_to_play, list):
+            self.sound_to_play = [str(_locate_guide_file(p)) for p in self.sound_to_play]
+        elif isinstance(self.sound_to_play, str) and self.sound_to_play:
+            self.sound_to_play = str(_locate_guide_file(self.sound_to_play))
         self._calc_internals()
 
     def check_config(self, merge_conf):
@@ -278,7 +310,6 @@ class ScheduleFrame(tk.Frame):
             )
 
             channel_label.place(x=x_offset, y=y_offset, height=int(self.conf.sched_h), width=int(self.conf.network_w))
-            self.update_time()
 
             x_offset = self.conf.network_w
 
@@ -303,6 +334,7 @@ class ScheduleFrame(tk.Frame):
             y_offset += self.conf.sched_h
 
         self.scroll_frame_id = self.canvas.create_window((0, 0), window=self.scroll_frame, anchor=tk.NW)
+        self.update_time()
         self.after(1000, self.scroll_canvas_view)
 
 
@@ -423,28 +455,75 @@ class GuideApp(tk.Tk):
             merge_conf.merge_config(user_conf)
 
         self.conf = merge_conf
+        self.ad_frame = None
+        self.schedule_frame = None
+        self.shown = False
 
         # self.resizable(False, False)
-        self.after(1000, self.tick)
+        self.after(250, self.tick)
         self.queue = queue
 
     def get_conf(self):
         return self.conf
 
+    def show(self):
+        """Bring the guide up with a fresh schedule grid."""
+        try:
+            StationManager().reload_if_changed()     # channels added since last time
+        except Exception:
+            pass
+        if self.ad_frame is None:
+            self.ad_frame = AdFrame(self, self.conf)
+        if self.schedule_frame is None:
+            self.schedule_frame = ScheduleFrame(self, self.conf)
+        else:
+            self.schedule_frame.refresh()
+        self.deiconify()
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
+        self.shown = True
+
+    def hide(self):
+        """Keep the process (and its imports) around for next time."""
+        try:
+            self.attributes("-topmost", False)
+        except tk.TclError:
+            pass
+        self.withdraw()
+        self.shown = False
+
     def tick(self):
         if self.queue and self.queue.qsize() > 0:
             msg = self.queue.get_nowait()
             if msg == GuideCommands.hide_window:
+                self.hide()
+            elif msg == GuideCommands.show_window:
+                self.show()
+            elif msg == GuideCommands.exit_process:
                 print("Guide window is shutting down now.")
                 self.destroy()
+                return
 
         self.after(250, self.tick)
 
 
-def guide_channel_runner(user_conf, queue):
+def guide_channel_runner(user_conf, queue, start_hidden=False):
+    """The guide process.
+
+    Started hidden by the player as soon as it is up, so the seconds of
+    interpreter start-up and imports are already paid when the guide channel
+    is tuned; from then on show/hide messages on the queue flip the window
+    and rebuild the grid.
+    """
     app = GuideApp(user_conf, queue)
-    AdFrame(app, app.get_conf())
-    ScheduleFrame(app, app.get_conf())
+    if start_hidden:
+        app.withdraw()
+    else:
+        app.show()
 
     app.mainloop()
 

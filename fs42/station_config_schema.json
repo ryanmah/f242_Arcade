@@ -104,6 +104,12 @@
           "type": "number",
           "description": "MPV panscan value (e.g., 1.0) to fill screen by cropping edges"
         },
+        "video_zoom": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2.0,
+          "description": "Extra zoom on the picture (1.0 = none, 1.2 = 20% bigger)"
+        },
         "media_filter": {
           "type": "string",
           "enum": ["video", "audio", "mixed"],

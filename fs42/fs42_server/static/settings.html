@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - FieldStation42</title>
+    <link rel="stylesheet" href="https://unpkg.com/purecss@3.0.0/build/pure-min.css">
+    <link rel="stylesheet" href="https://unpkg.com/purecss@3.0.0/build/grids-responsive-min.css">
+    <link rel="stylesheet" id="theme-css" href="/static/themes/default.css">
+    <style>
+        .fs42-card { padding: 1em 1.25em; margin-bottom: 1.5em; border: 1px solid #30363d; border-radius: 6px; }
+        .fs42-path { font-family: monospace; word-break: break-all; }
+        .fs42-muted { opacity: 0.7; }
+        .fs42-status { margin-top: 0.75em; padding: 0.6em 0.8em; border-radius: 4px; display: none; }
+        .fs42-status.ok { display: block; background: rgba(126, 211, 33, 0.15); }
+        .fs42-status.warn { display: block; background: rgba(255, 196, 0, 0.15); }
+        .fs42-status.bad { display: block; background: rgba(248, 81, 73, 0.15); }
+        .fs42-row { display: flex; gap: 0.5em; flex-wrap: wrap; align-items: center; }
+        .fs42-row input[type=text] { flex: 1 1 24em; min-width: 16em; }
+        ul.fs42-facts { margin: 0.5em 0 0 1.2em; padding: 0; }
+    </style>
+</head>
+<body>
+    <script src="/static/common.js"></script>
+    <script>
+        let state = null;
+
+        function esc(text) {
+            return String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        function describe(contents) {
+            if (!contents) return '';
+            const facts = [];
+            if (!contents.exists) return '<li>Folder not found</li>';
+            facts.push(`${contents.station_configs} station config${contents.station_configs === 1 ? '' : 's'} in confs/`);
+            facts.push(contents.has_catalog ? 'has a catalog/ folder' : 'no catalog/ folder yet');
+            facts.push(contents.has_schedules ? 'has a runtime/ folder (schedules, state)' : 'no runtime/ folder yet');
+            facts.push(contents.writable ? 'writable' : 'NOT writable');
+            return facts.map(f => `<li>${esc(f)}</li>`).join('');
+        }
+
+        function setStatus(id, kind, html) {
+            const el = document.getElementById(id);
+            el.className = 'fs42-status ' + kind;
+            el.innerHTML = html;
+        }
+
+        async function load() {
+            const response = await fetch('/settings/data_root');
+            state = await response.json();
+            render();
+        }
+
+        function render() {
+            document.getElementById('current-path').textContent = state.current;
+            const src = {environment: 'set by the FS42_HOME environment variable',
+                         settings: 'chosen on this page',
+                         default: 'the default location'}[state.source] || state.source;
+            document.getElementById('current-source').textContent = src;
+            document.getElementById('current-facts').innerHTML = describe(state.current_contents);
+            document.getElementById('default-path').textContent = state.default;
+
+            const input = document.getElementById('new-path');
+            if (!input.value) input.value = state.configured || '';
+
+            const pending = document.getElementById('pending');
+            if (state.restart_required) {
+                pending.style.display = 'block';
+                document.getElementById('pending-path').textContent = state.configured || state.default;
+            } else {
+                pending.style.display = 'none';
+            }
+            const locked = state.locked_by_environment;
+            for (const id of ['btn-check', 'btn-use', 'btn-reset', 'new-path']) {
+                document.getElementById(id).disabled = locked;
+            }
+            document.getElementById('locked-note').style.display = locked ? 'block' : 'none';
+            document.getElementById('btn-reset').style.display = state.configured ? 'inline-block' : 'none';
+        }
+
+        async function check() {
+            const path = document.getElementById('new-path').value.trim();
+            if (!path) return setStatus('check-status', 'warn', 'Type or paste a folder path first.');
+            const response = await fetch('/settings/data_root/check', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})});
+            const info = await response.json();
+            if (!info.is_dir || !info.writable) {
+                return setStatus('check-status', 'bad', esc(info.problems.join(' ')) || 'That folder cannot be used.');
+            }
+            let kind = 'ok', lead;
+            if (info.looks_like_fs42) {
+                lead = `Looks like a FieldStation42 folder.`;
+            } else if (info.empty) {
+                lead = `Empty folder - FieldStation42 would set it up from scratch.`;
+            } else {
+                kind = 'warn';
+                lead = esc(info.problems.join(' '));
+            }
+            setStatus('check-status', kind, `${lead}<ul class="fs42-facts">${describe(info)}</ul>`);
+            return info;
+        }
+
+        async function use() {
+            const path = document.getElementById('new-path').value.trim();
+            if (!path) return setStatus('check-status', 'warn', 'Type or paste a folder path first.');
+            const response = await fetch('/settings/data_root', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})});
+            const body = await response.json();
+            if (!response.ok) return setStatus('check-status', 'bad', esc(body.detail || 'Could not save'));
+            state = body;
+            render();
+            setStatus('check-status', 'ok', 'Saved. Restart FieldStation42 to switch to this folder.');
+        }
+
+        async function reset() {
+            const response = await fetch('/settings/data_root/reset', {method: 'POST'});
+            const body = await response.json();
+            if (!response.ok) return setStatus('check-status', 'bad', esc(body.detail || 'Could not reset'));
+            state = body;
+            document.getElementById('new-path').value = '';
+            render();
+            setStatus('check-status', 'ok', 'Back to the default folder. Restart FieldStation42 to switch.');
+        }
+
+        async function restart() {
+            const btn = document.getElementById('btn-restart');
+            btn.disabled = true;
+            setStatus('restart-status', 'warn', 'Restarting - the TV window will close and reopen. This page reconnects on its own.');
+            try {
+                await fetch('/settings/restart', {method: 'POST'});
+            } catch (e) { /* the server is going away; that is the point */ }
+            const started = Date.now();
+            await new Promise(r => setTimeout(r, 4000));
+            while (Date.now() - started < 90000) {
+                try {
+                    const response = await fetch('/settings/ping', {cache: 'no-store'});
+                    if (response.ok) {
+                        const body = await response.json();
+                        setStatus('restart-status', 'ok', `Back up. Data folder is now <span class="fs42-path">${esc(body.data_root)}</span>.`);
+                        btn.disabled = false;
+                        await load();
+                        return;
+                    }
+                } catch (e) { /* not back yet */ }
+                await new Promise(r => setTimeout(r, 1500));
+            }
+            setStatus('restart-status', 'bad', 'Still not answering after 90 seconds. Start FieldStation42 from the Start Menu / application menu and reload this page.');
+            btn.disabled = false;
+        }
+
+        document.addEventListener('DOMContentLoaded', async function () {
+            window.fs42Common.initTheme();
+            const content = `
+                <div class="fs42-card">
+                    <h2 style="margin-top:0">Data folder</h2>
+                    <p class="fs42-muted">Where your channel configs (<code>confs/</code>), catalog, schedules and runtime files live.
+                    Point this at a folder on another drive - for example one that already holds a FieldStation42 setup.
+                    Your video files are referenced by each channel's <code>content_dir</code> and are not moved.</p>
+
+                    <p><strong>In use now:</strong> <span id="current-path" class="fs42-path"></span><br>
+                    <span class="fs42-muted">(<span id="current-source"></span>)</span></p>
+                    <ul id="current-facts" class="fs42-facts"></ul>
+
+                    <div id="pending" class="fs42-status warn" style="display:none; margin-top:1em;">
+                        A different folder is saved (<span id="pending-path" class="fs42-path"></span>) and will be used
+                        after the next restart.
+                    </div>
+
+                    <div id="locked-note" class="fs42-status warn" style="display:none;">
+                        The data folder is fixed by the <code>FS42_HOME</code> environment variable on this machine, so it cannot be changed here.
+                    </div>
+
+                    <h3>Use a different folder</h3>
+                    <form class="pure-form" onsubmit="return false;">
+                        <div class="fs42-row">
+                            <input id="new-path" type="text" placeholder="e.g. E:\\FieldStation42 or /media/usb/fieldstation42">
+                            <button id="btn-check" class="pure-button" onclick="check()">Check</button>
+                            <button id="btn-use" class="pure-button pure-button-primary" onclick="use()">Use this folder</button>
+                            <button id="btn-reset" class="pure-button" onclick="reset()" style="display:none;">Back to default</button>
+                        </div>
+                    </form>
+                    <div id="check-status" class="fs42-status"></div>
+                    <p class="fs42-muted" style="margin-top:1em;">Default location: <span id="default-path" class="fs42-path"></span>.
+                    If the drive is missing at startup, FieldStation42 falls back to the default folder for that session.</p>
+                </div>
+
+                <div class="fs42-card">
+                    <h2 style="margin-top:0">Restart</h2>
+                    <p class="fs42-muted">Stops and starts the player, the web console and the on-screen display. Needed after changing the data folder.</p>
+                    <button id="btn-restart" class="pure-button pure-button-primary" onclick="restart()">Restart FieldStation42</button>
+                    <div id="restart-status" class="fs42-status"></div>
+                </div>
+            `;
+            document.body.innerHTML = await window.fs42Common.createPageLayout('Settings', content);
+            await load();
+        });
+    </script>
+</body>
+</html>

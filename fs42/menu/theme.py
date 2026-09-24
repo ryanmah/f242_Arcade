@@ -1,23 +1,68 @@
-"""Colours and metrics for the in-app menu.
+"""Colours, font and metrics for the in-app menu.
 
-Matches the web console's default theme (fs42_server/static/themes/default.css)
-so the two read as one product, and scales with the screen like the
-now-playing overlay does.
+The menu is drawn like a VCR's on-screen display: white monospace text on
+black, a dashed title bar and a solid white bar behind the selected line
+with its text knocked out.  The font is VCR OSD Mono, bundled in ``fs42/menu/fonts``; when it
+cannot be loaded the system's monospace font stands in.
 """
+
+import logging
+from pathlib import Path
 
 from PySide6.QtGui import QColor, QFont
 
-BACKDROP = QColor(13, 17, 23, 205)      # #0d1117
-PANEL = QColor(22, 27, 34, 250)         # #161b22
-ROW = QColor(22, 27, 34, 255)
-ROW_SELECTED = QColor(33, 42, 56, 255)
-BORDER = QColor(48, 54, 61, 255)        # #30363d
-ACCENT = QColor(97, 175, 239, 255)      # #61afef
-TEXT = QColor(230, 230, 230, 255)       # #e6e6e6
-MUTED = QColor(139, 148, 158, 255)      # #8b949e
-GOOD = QColor(126, 211, 33, 255)
-WARN = QColor(255, 196, 0, 255)
-BAD = QColor(248, 81, 73, 255)
+_l = logging.getLogger("MENU")
+
+# A VCR display: white text on black, a white bar under the selected line.
+SCREEN = QColor(0, 0, 0, 255)
+BACKDROP = QColor(0, 0, 0, 148)          # 60% black: the picture shows through
+PANEL = SCREEN
+GREEN = QColor(96, 255, 64, 255)
+WHITE = QColor(255, 255, 255, 255)
+ROW = QColor(0, 0, 0, 0)                 # rows have no box of their own
+ROW_SELECTED = WHITE                     # the bar behind the selected line
+ROW_SELECTED_TEXT = SCREEN               # ...with the text knocked out of it
+ROW_SHADOW = QColor(0, 0, 0, 0)
+BORDER = WHITE
+ACCENT = WHITE
+TEXT = WHITE
+SHADOW = QColor(0, 0, 0, 0)              # no drop shadow on a black screen
+MUTED = QColor(176, 176, 176, 255)
+GOOD = WHITE
+WARN = QColor(255, 232, 90, 255)
+BAD = QColor(255, 120, 96, 255)
+
+# Everything the pages draw is sized against a 1080p screen and then
+# scaled by this on top; 1.2 is "a fifth bigger than the first cut".
+TEXT_SCALE = 1.2
+
+FONT_FILE = Path(__file__).parent / "fonts" / "VCR_OSD_MONO.ttf"
+FALLBACK_FAMILY = "Monospace"
+_family = None
+
+
+def load_fonts() -> str:
+    """Register the bundled font with Qt (once) and return its family name."""
+    global _family
+    if _family is not None:
+        return _family
+    from PySide6.QtGui import QFontDatabase
+
+    _family = FALLBACK_FAMILY
+    try:
+        font_id = QFontDatabase.addApplicationFont(str(FONT_FILE))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if families:
+            _family = families[0]
+        else:
+            _l.warning("Could not load the menu font from %s; using %s", FONT_FILE, FALLBACK_FAMILY)
+    except Exception as e:
+        _l.warning("Could not load the menu font: %s", e)
+    return _family
+
+
+def family() -> str:
+    return _family or load_fonts()
 
 
 def scale_for(screen_height: int) -> float:
@@ -25,8 +70,10 @@ def scale_for(screen_height: int) -> float:
 
 
 def font(size: float, bold=False, scale=1.0) -> QFont:
-    f = QFont("Arial", max(8, int(size * scale)))
-    f.setBold(bold)
+    # The VCR face has one weight; "bold" only matters for the fallback.
+    f = QFont(family(), max(8, int(size * scale)))
+    f.setBold(bold and family() == FALLBACK_FAMILY)
+    f.setStyleHint(QFont.Monospace)
     return f
 
 
@@ -38,14 +85,15 @@ def stylesheet(scale: float) -> str:
     """Stylesheet for the few stock widgets the wizard uses (line edit, spin box)."""
     px = lambda n: f"{int(n * scale)}px"
     return f"""
-    QWidget {{ color: {css(TEXT)}; font-family: Arial; font-size: {px(22)}; }}
+    QWidget {{ color: {css(TEXT)}; font-family: "{family()}"; font-size: {px(24)}; }}
     QLineEdit, QSpinBox {{
-        background: {css(ROW_SELECTED)}; border: 2px solid {css(BORDER)};
-        border-radius: {px(6)}; padding: {px(8)} {px(12)}; selection-background-color: {css(ACCENT)};
+        background: {css(SCREEN)}; border: 2px solid {css(MUTED)};
+        border-radius: 0; padding: {px(4)} {px(10)}; selection-background-color: {css(TEXT)};
+        selection-color: {css(SCREEN)};
     }}
-    QLineEdit:focus, QSpinBox:focus {{ border-color: {css(ACCENT)}; }}
+    QLineEdit:focus, QSpinBox:focus {{ border-color: {css(TEXT)}; }}
     QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
     QScrollBar:vertical {{ background: transparent; width: {px(8)}; }}
-    QScrollBar::handle:vertical {{ background: {css(BORDER)}; border-radius: {px(4)}; }}
+    QScrollBar::handle:vertical {{ background: {css(MUTED)}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     """

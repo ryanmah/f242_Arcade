@@ -1,5 +1,6 @@
 from enum import Enum
 import logging
+from pathlib import Path
 
 import multiprocessing
 import time
@@ -209,6 +210,12 @@ class StationPlayer:
             }
             if mpv_binary is not None:
                 mpv_kwargs["mpv_location"] = str(mpv_binary)
+            if start_it and self._mpv_supports(mpv_binary, "osd-fonts-dir"):
+                # Lets the OSD (channel number and name) use the same VCR
+                # face as the menu without installing the font.  mpv 0.40+;
+                # older builds only know sub-fonts-dir, which leaves the OSD
+                # on its default face.
+                mpv_kwargs["osd_fonts_dir"] = str(paths.menu_fonts_dir())
             if start_it:
                 # Closing the mpv window or pressing q is the only "I want out"
                 # affordance in a windowed build with no console.
@@ -217,7 +224,10 @@ class StationPlayer:
             self.mpv = MPV(**mpv_kwargs)
             if start_it:
                 self._bind_menu_keys()
+                self._focus_video_window()
+                self.apply_video_effects()
         else:
+            self.mpv = mpv
             self.ipc_endpoint = None
 
         self.station_config = station_config
@@ -229,6 +239,12 @@ class StationPlayer:
         self.skip_reception_check = False
         self.web_process = None
         self.web_queue = None
+        self.guide_process = None
+        self.guide_queue = None
+        self.overlay_process = None
+        self.overlay_queue = None
+        self._guide_showing = False
+        self._overlay_supported = None
         self.scrambler = None
         self.now_playing_process = None
         self.schedule_lock = None
@@ -240,6 +256,105 @@ class StationPlayer:
         self._gamepad = None
         if StationManager().server_conf.get("gamepad"):
             self._start_gamepad()
+        self._prewarmer = None
+        if StationManager().server_conf.get("prewarm_media", True):
+            try:
+                from fs42.prewarm import Prewarmer
+
+                self._prewarmer = Prewarmer()
+                self._prewarmer.start()
+            except Exception as e:
+                self._l.warning("Media pre-warm unavailable: %s", e)
+
+    # ------------------------------------------------ effects over the guide
+
+    def _overlay_alive(self):
+        process = getattr(self, "overlay_process", None)
+        return process is not None and process.is_alive()
+
+    def _overlay_send(self, message, values=None):
+        """Show/hide/update the see-through CRT layer used over the guide."""
+        from fs42 import video_effects
+
+        values = video_effects.clean(values) if values is not None else video_effects.load()
+        if message == "show" and video_effects.is_off(values):
+            message = "hide"
+        if message in ("hide", "values") and not self._overlay_alive():
+            return
+        if message == "show" and not self._overlay_alive():
+            if self._overlay_supported is None:
+                from fs42.effects_overlay import compositing_available
+
+                self._overlay_supported = compositing_available()
+                if not self._overlay_supported:
+                    self._l.info("No compositor: video effects will not cover the guide channel")
+            if not self._overlay_supported:
+                return
+            try:
+                from fs42.effects_overlay import _overlay_entry
+
+                self.overlay_queue = multiprocessing.Queue()
+                self.overlay_process = multiprocessing.Process(
+                    target=_overlay_entry, args=(self.overlay_queue,), name="fs42-effects")
+                self.overlay_process.daemon = True
+                self.overlay_process.start()
+            except Exception as e:
+                self._l.warning("Could not start the effects overlay: %s", e)
+                self.overlay_process = None
+                return
+        try:
+            if message == "hide":
+                self.overlay_queue.put(("hide",))
+            else:
+                self.overlay_queue.put((message, values))
+        except Exception:
+            pass
+
+    def _stop_overlay(self):
+        if self.overlay_process is None:
+            return
+        try:
+            if self.overlay_process.is_alive():
+                self.overlay_queue.put(("exit",))
+                self.overlay_process.join(timeout=2)
+            if self.overlay_process.is_alive():
+                self.overlay_process.terminate()
+        except Exception:
+            pass
+        self.overlay_process = None
+        self.overlay_queue = None
+
+    def apply_video_effects(self, values=None):
+        """Put the CRT scanline/noise shader on mpv (saved settings by default)."""
+        from fs42 import video_effects
+
+        values = video_effects.clean(values) if values is not None else video_effects.load()
+        # (Called once from __init__ before the overlay attributes exist.)
+        if getattr(self, "_guide_showing", False):
+            self._overlay_send("show", values)
+        elif hasattr(self, "overlay_process"):
+            self._overlay_send("values", values)
+        if self.mpv is None:
+            return
+        if video_effects.apply_to_mpv(self.mpv, values):
+            self._l.info("Video effects: scanlines %.0f%% every %dpx, noise %.0f%% at %dpx",
+                         values["scanline_opacity"] * 100, values["scanline_size"],
+                         values["noise_opacity"] * 100, values["noise_grain"])
+
+    @staticmethod
+    def _mpv_supports(binary, option: str) -> bool:
+        """Whether this mpv knows an option (only probed for non-bundled mpv)."""
+        if binary is None:
+            return False
+        try:
+            if paths.bin_dir() in Path(binary).parents:
+                return True         # the bundled build is recent enough
+            result = platform_compat.run_hidden(
+                [str(binary), "--no-config", "--list-options"], capture_output=True, text=True, timeout=10
+            )
+            return f"--{option}" in (result.stdout or "")
+        except Exception:
+            return False
 
     def _on_mpv_quit(self):
         """mpv window closed by the user - bring the whole app down with it."""
@@ -303,6 +418,22 @@ class StationPlayer:
 
     # ------------------------------------------------------------ in-app menu
 
+    def _mpv_pid(self):
+        try:
+            return self.mpv.mpv_process.process.pid
+        except AttributeError:
+            return None
+
+    def _focus_video_window(self):
+        """Give the video window keyboard focus (Windows).
+
+        Escape, the arrows and the number keys are read by mpv, so the
+        window must own the keyboard; Windows does not hand focus to windows
+        opened by background processes, which every one of ours is.
+        """
+        if platform_compat.IS_WINDOWS and not os.environ.get("FS42_NO_FOCUS"):
+            platform_compat.focus_window_of_pid_soon(self._mpv_pid())
+
     def _bind_menu_keys(self):
         """Route keys pressed on the mpv window to the menu.
 
@@ -324,16 +455,24 @@ class StationPlayer:
         def make(action):
             def callback():
                 now = time.monotonic()
-                gap = 0.12 if action in navigation else 0.35
+                try:
+                    menu_open = bool(ipc.get_state(ipc.KEY_MENU_OPEN))
+                except Exception:
+                    menu_open = False
+                gap = 0.12 if (action in navigation and menu_open) else 0.35
                 if now - last_fired.get(action, 0.0) < gap:
                     return
                 last_fired[action] = now
                 try:
-                    if action == Action.BACK.value and not ipc.get_state(ipc.KEY_MENU_OPEN):
+                    if menu_open:
+                        ipc.push(ipc.TOPIC_MENU_INPUT, {"action": action})
+                    elif action == Action.BACK.value:
                         # Escape with no menu up: open it.
                         ipc.push(ipc.TOPIC_PLAYER_CMD, {"command": "menu"})
-                    elif ipc.get_state(ipc.KEY_MENU_OPEN):
-                        ipc.push(ipc.TOPIC_MENU_INPUT, {"action": action})
+                    elif action in (Action.UP.value, Action.DOWN.value):
+                        # No menu: the arrow keys surf channels, like the
+                        # controller's D-pad.
+                        ipc.push(ipc.TOPIC_CHANNEL, {"command": "up" if action == Action.UP.value else "down"})
                 except Exception as e:
                     self._l.debug("menu key forward failed: %s", e)
             return callback
@@ -353,6 +492,30 @@ class StationPlayer:
         except Exception as e:
             self._l.warning("Gamepad support unavailable: %s", e)
 
+    def _restart_gamepad(self):
+        """Pick up a new button map (or a freshly enabled controller)."""
+        if self._prewarmer is not None:
+            try:
+                self._prewarmer.stop()
+            except Exception:
+                pass
+            self._prewarmer = None
+        if self._gamepad is not None:
+            try:
+                self._gamepad.stop()
+            except Exception:
+                pass
+            self._gamepad = None
+        try:
+            from fs42.station_io import StationIO
+
+            config = StationIO().load_main_config() or {}
+        except Exception:
+            config = {}
+        if config.get("gamepad", StationManager().server_conf.get("gamepad")):
+            self._l.info("Restarting the gamepad reader")
+            self._start_gamepad()
+
     def menu_is_open(self) -> bool:
         return bool(self.menu_process is not None and self.menu_process.is_alive())
 
@@ -363,6 +526,7 @@ class StationPlayer:
 
         self._l.info("Opening the channel menu")
         ipc.set_state(ipc.KEY_MENU_OPEN, True)
+        ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
         if StationManager().server_conf.get("menu_drop_fullscreen"):
             try:
                 self.mpv.fs = False
@@ -381,6 +545,8 @@ class StationPlayer:
                 pass
         self.menu_process = None
         ipc.set_state(ipc.KEY_MENU_OPEN, False)
+        ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
+        self._focus_video_window()
         if self._menu_fullscreen_dropped:
             try:
                 self.mpv.fs = True
@@ -417,6 +583,7 @@ class StationPlayer:
         liquid = LiquidManager()
         liquid_init_time = time.perf_counter() - start_time
         self._l.info(f"LiquidManager() initialization took {liquid_init_time:.3f} seconds")
+        self.warm_guide()
 
     def show_text(self, text, duration=4):
         self.mpv.command("show-text", text, duration)
@@ -462,6 +629,48 @@ class StationPlayer:
             and response.payload == "menu:open"
         ):
             self.open_menu()
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and response.payload == "input:reload"
+        ):
+            self._restart_gamepad()
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and isinstance(response.payload, str)
+            and response.payload.startswith("picture:")
+        ):
+            # Live preview from the menu, only for the channel on screen.
+            from fs42 import picture
+
+            try:
+                message = json.loads(response.payload.split(":", 1)[1])
+            except ValueError:
+                message = {}
+            if (self.station_config or {}).get("network_name") == message.get("network_name"):
+                values = message.get("values")
+                if values is None:
+                    picture.apply_station(self.mpv, self.station_config)
+                else:
+                    picture.apply_to_mpv(self.mpv, values, panscan=self.station_config.get("panscan"))
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and isinstance(response.payload, str)
+            and response.payload.startswith("video_effects:")
+        ):
+            try:
+                values = json.loads(response.payload.split(":", 1)[1])
+            except ValueError:
+                values = None
+            self.apply_video_effects(values)
             return True
 
         return False
@@ -527,6 +736,12 @@ class StationPlayer:
 
     def shutdown(self):
         self.current_playing_file_path = None
+        try:
+            from fs42 import video_effects
+
+            video_effects.cleanup_shader_files()
+        except Exception:
+            pass
         # Terminate any running web process
         if self.web_process and self.web_process.is_alive():
             self._l.info("Terminating web process")
@@ -547,6 +762,8 @@ class StationPlayer:
 
         self.web_process = None
         self.web_queue = None
+        self._stop_guide_process()
+        self._stop_overlay()
 
         # Terminate any running now playing overlay
         self._l.info("Terminating now playing overlay")
@@ -592,6 +809,12 @@ class StationPlayer:
 
     def play_file(self, file_path, file_duration=None, offset_seconds=None, is_stream=False, title="Unknown", content_type=None, media_type=None):
         try:
+            if not is_stream and not AutoBumpAgent.is_autobump_url(file_path):
+                # Catalogs built elsewhere name files by where they were then.
+                located = paths.locate_media(file_path)
+                if located != file_path:
+                    self._l.debug(f"{file_path} found at {located}")
+                    file_path = located
             if os.path.exists(file_path) or is_stream or AutoBumpAgent.is_autobump_url(file_path):
                 self._l.debug(f"%%%Attempting to play {file_path}")
                 self.current_playing_file_path = file_path
@@ -642,15 +865,10 @@ class StationPlayer:
                     self.show_web(conf, blocking=False)
                     return True
 
-                if "panscan" in self.station_config:
-                    self.mpv.panscan = self.station_config["panscan"]
-                else:
-                    self.mpv.panscan = 0.0
+                # Per-channel scaling and zoom (fs42/picture.py).
+                from fs42 import picture
 
-                if "video_keepaspect" in self.station_config:
-                    self.mpv.keepaspect = self.station_config["video_keepaspect"]
-                else:
-                    self.mpv.keepaspect = True
+                picture.apply_station(self.mpv, self.station_config)
 
                 self._apply_vfx(datetime.datetime.now())
 
@@ -797,7 +1015,7 @@ class StationPlayer:
 
         try:
             # Filter out any files that don't exist
-            valid_files = [f for f in file_list if os.path.exists(f)]
+            valid_files = [f for f in (paths.locate_media(f) for f in file_list) if os.path.exists(f)]
 
             if not valid_files:
                 self._l.error("No valid audio files found in playlist")
@@ -884,17 +1102,60 @@ class StationPlayer:
     def play_image(self, duration):
         pass
 
-    def show_guide(self, guide_config):
-        # create the pipe to communicate with the guide channel
-        queue = multiprocessing.Queue()
-        guide_process = multiprocessing.Process(
+    def _guide_alive(self):
+        return self.guide_process is not None and self.guide_process.is_alive()
+
+    def _start_guide_process(self, guide_config, hidden):
+        self.guide_queue = multiprocessing.Queue()
+        self.guide_process = multiprocessing.Process(
             target=_guide_channel_runner(),
-            args=(
-                guide_config,
-                queue,
-            ),
+            args=(guide_config, self.guide_queue, hidden),
+            name="fs42-guide",
         )
-        guide_process.start()
+        self.guide_process.daemon = True
+        self.guide_process.start()
+
+    def warm_guide(self):
+        """Start the guide process hidden so tuning to it later is quick."""
+        if self._guide_alive():
+            return
+        guide_config = StationManager().guide_config
+        if not guide_config or guide_config.get("network_type") != "guide":
+            return
+        try:
+            self._start_guide_process(guide_config, hidden=True)
+            self._l.info("Guide channel process started in the background")
+        except Exception as e:
+            self._l.warning("Could not pre-start the guide channel: %s", e)
+
+    def _stop_guide_process(self):
+        if self.guide_process is None:
+            return
+        try:
+            if self.guide_queue is not None and self.guide_process.is_alive():
+                self.guide_queue.put(_guide_commands().exit_process)
+                self.guide_process.join(timeout=2)
+        except Exception:
+            pass
+        try:
+            if self.guide_process.is_alive():
+                self.guide_process.terminate()
+                self.guide_process.join(timeout=1)
+        except Exception:
+            pass
+        self.guide_process = None
+        self.guide_queue = None
+
+    def show_guide(self, guide_config):
+        # Reuse the warm process when there is one; otherwise start it now.
+        if self._guide_alive():
+            self.guide_queue.put(_guide_commands().show_window)
+        else:
+            self._start_guide_process(guide_config, hidden=False)
+        queue = self.guide_queue
+        guide_process = self.guide_process
+        self._guide_showing = True
+        self._overlay_send("show")
 
         if "play_sound" in guide_config and guide_config["play_sound"]:
             sound_to_play = guide_config["sound_to_play"]
@@ -958,9 +1219,13 @@ class StationPlayer:
             if response:
                 if self.handle_runtime_command_outcome(response):
                     continue
-                self._l.info("Sending the guide channel shutdown command")
-                queue.put(_guide_commands().hide_window)
-                guide_process.join()
+                self._l.info("Hiding the guide channel")
+                self._guide_showing = False
+                self._overlay_send("hide")
+                if guide_process.is_alive():
+                    queue.put(_guide_commands().hide_window)
+                else:
+                    self._stop_guide_process()
                 return response
 
         return PlayerOutcome(PlayerState.SUCCESS)
@@ -1058,6 +1323,9 @@ class StationPlayer:
             self.schedule_lock.acquire()
         try:
             schedule = LiquidSchedule(StationManager().station_by_name(network_name))
+            # A schedule that ended in the past is thrown away by the
+            # schedule builder; one that ends later today or tomorrow just
+            # needs another day.  Either way one call is enough.
             schedule.add_days(1)
             self._l.warning(f"Schedule extended for {network_name} - reloading schedules now")
             LiquidManager().reload_schedules()

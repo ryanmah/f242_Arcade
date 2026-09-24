@@ -4,7 +4,7 @@ import json
 import datetime
 
 from fs42.station_manager import StationManager
-from fs42.liquid_manager import LiquidManager, ScheduleNotFound, ScheduleQueryNotInBounds
+from fs42.liquid_manager import ScheduleNotFound
 from fs42.liquid_blocks import LiquidBlock
 from fs42.title_parser import TitleParser
 
@@ -30,32 +30,36 @@ class PreviewBlock:
 class ScheduleQuery:
     @staticmethod
     def query_slot(network_name, when, normalize):
+        """The programme blocks covering the 90 minutes from ``when``.
+
+        Reads just those blocks straight from the schedule database instead
+        of loading every station's whole schedule through LiquidManager,
+        which took seconds on a big setup every time the guide opened.
+        """
+        from fs42.liquid_io import LiquidIO
+
         start_marker = when
-        current_marker = start_marker
-        next_marker = start_marker
         end_target = start_marker + datetime.timedelta(hours=1, minutes=30)
+        fmt = "%Y-%m-%d %H:%M:%S"
+        found = LiquidIO().query_liquid_blocks(network_name, start_marker.strftime(fmt), end_target.strftime(fmt))
+        if not found:
+            raise ScheduleNotFound(f"No schedule for {network_name} at {when}")
+
         blocks = []
-        keep_going = True
-
-        while keep_going:
-            programming_block: LiquidBlock = LiquidManager().get_programming_block(network_name, current_marker)
-
-            total_duration = programming_block.playback_duration()
-            remaining_duration = datetime.timedelta(seconds=total_duration)
-            started_earlier = False
-            ends_later = False
-            if programming_block.start_time < start_marker:
+        current_marker = start_marker
+        for programming_block in found:
+            if programming_block.end_time <= current_marker:
+                continue
+            started_earlier = programming_block.start_time < start_marker
+            if started_earlier:
                 remaining_duration = programming_block.end_time - start_marker
-                started_earlier = True
+            else:
+                remaining_duration = datetime.timedelta(seconds=programming_block.playback_duration())
 
             next_marker = current_marker + remaining_duration + datetime.timedelta(seconds=1)
-
-            if next_marker > end_target:
-                ends_later = True
+            ends_later = next_marker > end_target
 
             _display_title = programming_block.title
-
-            #normalize if explicitely told to
             if normalize:
                 _display_title = normalize_video_title(programming_block.title)
 
@@ -64,9 +68,8 @@ class ScheduleQuery:
             _block.ends_later = ends_later
             _block.width = remaining_duration.total_seconds()
             blocks.append(_block)
-            if next_marker > end_target:
-                keep_going = False
-
+            if ends_later:
+                break
             current_marker = next_marker
 
         return blocks

@@ -68,6 +68,13 @@ def resources(*parts) -> Path:
 
 
 def _default_data_root() -> Path:
+    # Where the launcher settings live and where data goes unless redirected.
+    # FS42_DEFAULT_HOME exists so tests can exercise the redirect logic
+    # without touching a real profile; FS42_HOME (see data()) is the user
+    # facing override and wins over everything.
+    forced_default = os.environ.get("FS42_DEFAULT_HOME")
+    if forced_default:
+        return Path(forced_default).expanduser().resolve()
     if not IS_FROZEN:
         # Running from a checkout: behave exactly like upstream.
         return _repo_root()
@@ -78,13 +85,146 @@ def _default_data_root() -> Path:
     return Path(base) / APP_DIRNAME
 
 
+# --------------------------------------------------------------------------
+# Launcher settings: a tiny file in the *default* location that can point the
+# data root somewhere else (an external drive with an existing confs/ and
+# catalog/, say).  It is read once per process, so a change takes effect on
+# the next start - the supervisor offers a restart for exactly that.
+# --------------------------------------------------------------------------
+
+LAUNCHER_FILE = "launcher.json"
+
+
+def launcher_settings_path() -> Path:
+    return _default_data_root() / LAUNCHER_FILE
+
+
+def read_launcher_settings() -> dict:
+    try:
+        with open(launcher_settings_path()) as handle:
+            loaded = json.load(handle)
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_launcher_settings(settings: dict):
+    target = launcher_settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".json.tmp")
+    with open(tmp, "w") as handle:
+        json.dump(settings, handle, indent=2)
+        handle.write("\n")
+    os.replace(tmp, target)
+
+
+def configured_data_root():
+    """The data root chosen in the launcher settings, or None."""
+    value = read_launcher_settings().get("data_root")
+    if not value:
+        return None
+    try:
+        return Path(str(value)).expanduser()
+    except (TypeError, ValueError):
+        return None
+
+
+def set_data_root(path):
+    """Point the data root at ``path`` (None restores the default).
+
+    Only the launcher file changes; running processes keep their current
+    root until restarted.
+    """
+    settings = read_launcher_settings()
+    if path:
+        settings["data_root"] = str(Path(str(path)).expanduser())
+    else:
+        settings.pop("data_root", None)
+    write_launcher_settings(settings)
+
+
+def _resolve_data_root():
+    override = os.environ.get("FS42_HOME")
+    if override:
+        return Path(override).expanduser().resolve(), "environment"
+    configured = configured_data_root()
+    if configured is not None and configured.is_dir():
+        return configured.resolve(), "settings"
+    return _default_data_root(), "default"
+
+
 def data(*parts) -> Path:
     """Writable user data root (configs, catalog, runtime state, media)."""
     global _cached_data_root
     if _cached_data_root is None:
-        override = os.environ.get("FS42_HOME")
-        _cached_data_root = Path(override).expanduser().resolve() if override else _default_data_root()
+        _cached_data_root = _resolve_data_root()[0]
     return _cached_data_root.joinpath(*[str(p) for p in parts])
+
+
+def inspect_data_root(path) -> dict:
+    """What a candidate data folder looks like, for the settings page."""
+    candidate = Path(str(path)).expanduser()
+    info = {
+        "path": str(candidate),
+        "exists": candidate.exists(),
+        "is_dir": candidate.is_dir(),
+        "writable": False,
+        "station_configs": 0,
+        "has_catalog": False,
+        "has_schedules": False,
+        "empty": False,
+        "looks_like_fs42": False,
+        "problems": [],
+    }
+    if not candidate.exists():
+        info["problems"].append("That folder does not exist. Is the drive connected?")
+        return info
+    if not candidate.is_dir():
+        info["problems"].append("That path is a file, not a folder.")
+        return info
+    try:
+        probe = candidate / ".fs42-write-test"
+        probe.write_text("ok")
+        probe.unlink()
+        info["writable"] = True
+    except OSError:
+        info["problems"].append("FieldStation42 cannot write there (read-only drive or permissions).")
+    try:
+        entries = list(candidate.iterdir())
+    except OSError:
+        entries = []
+    info["empty"] = not entries
+    confs_dir = candidate / "confs"
+    if confs_dir.is_dir():
+        info["station_configs"] = len([
+            f for f in confs_dir.glob("*.json") if f.name != "main_config.json"
+        ])
+    info["has_catalog"] = (candidate / "catalog").is_dir()
+    info["has_schedules"] = (candidate / "runtime").is_dir()
+    info["looks_like_fs42"] = confs_dir.is_dir() or info["has_catalog"]
+    if entries and not info["looks_like_fs42"]:
+        info["problems"].append(
+            "This folder has files in it but no confs/ or catalog/ folder; FieldStation42 would "
+            "create its own folders alongside them."
+        )
+    return info
+
+
+def data_root_info() -> dict:
+    """Current, configured and default data roots, for the settings page."""
+    current = data()
+    resolved, source = _resolve_data_root()
+    configured = configured_data_root()
+    return {
+        "current": str(current),
+        "default": str(_default_data_root()),
+        "configured": str(configured) if configured else None,
+        "configured_exists": bool(configured and configured.is_dir()),
+        "source": source,
+        "locked_by_environment": bool(os.environ.get("FS42_HOME")),
+        "restart_required": resolved != current,
+        "settings_file": str(launcher_settings_path()),
+    }
 
 
 def cache(*parts) -> Path:
@@ -174,6 +314,11 @@ def bin_dir() -> Path:
     return resources("bin", platform_tag())
 
 
+def menu_fonts_dir() -> Path:
+    """The bundled VCR font, shared by the menu and mpv's on-screen display."""
+    return resources("fs42", "menu", "fonts")
+
+
 def bundled_manifest() -> dict:
     """What fetch_binaries.py bundled: ``{name: {url, sha256, version, ...}}``.
 
@@ -240,6 +385,44 @@ def resolve_user_path(value) -> Path:
     if path.is_absolute():
         return path
     return data(raw)
+
+
+_relocated = {}
+
+
+def locate_media(value):
+    """Find a media file named in a catalog or schedule, wherever it is now.
+
+    Catalogs remember absolute paths from the machine that built them.  A
+    data folder carried over from a Pi (``/home/pi/FieldStation42/catalog/
+    NickTV/a.mp4``) or built with relative paths (``catalog/NickTV/a.mp4``)
+    still has the files - under this data folder.  Try, in order: the path
+    as given, the path relative to the data folder, then every suffix of a
+    foreign absolute path under the data folder (``catalog/NickTV/a.mp4``,
+    ``NickTV/a.mp4`` ...).  Returns the original string when nothing matches
+    so the caller's own error reporting still names it.
+    """
+    if not value or not isinstance(value, (str, os.PathLike)):
+        return value
+    raw = str(value)
+    if os.path.exists(raw):
+        return raw
+    cached = _relocated.get(raw)
+    if cached is not None and os.path.exists(cached):
+        return cached
+    resolved = resolve_user_path(raw)
+    if resolved is not None and resolved.exists():
+        _relocated[raw] = str(resolved)
+        return str(resolved)
+    parts = [p for p in raw.replace("\\", "/").split("/") if p and not p.endswith(":")]
+    root = data()
+    # Need at least a folder and a file name to call it a match.
+    for start in range(1, len(parts) - 1):
+        candidate = root.joinpath(*parts[start:])
+        if candidate.exists():
+            _relocated[raw] = str(candidate)
+            return str(candidate)
+    return raw
 
 
 def sandbox_roots():

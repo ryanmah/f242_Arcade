@@ -106,19 +106,56 @@ gamepad) to manage channels without leaving the TV:
   and a folder of loose files becomes a looping channel. Name it, give it a
   number, and it builds its catalog and a week of schedule right there.
 - **Per station** — tune to it, hide it from the channel list, rebuild its
-  catalog, extend or reset its schedule, delete it
+  catalog, extend or reset its schedule, set its **Picture** (scaling: fit
+  with bars, fill by cropping the edges, or stretch; and a zoom from 50% to
+  200%, previewed live when you are on that channel), delete it
 - **Rebuild all catalogs** / **Add a week to all schedules**
+- **Open web portal** — opens the web console in your browser and gets out
+  of its way
+- **Add input** — set up controllers, each with its own button layout.
+  *Add a controller*, press any button on it so FieldStation42 knows which
+  one you mean, then pick a function and press the button you want for it
+  (or *Map every button in order* and follow along) and Save. That turns the
+  controller on and the new layout is live immediately. Pick a controller
+  from the list to change or delete it. With the menu closed, *up* and
+  *down* change the channel (on the keyboard the arrow keys do the same);
+  with it open they move the cursor. On Windows every XInput pad shares one
+  layout; on Linux each device (an arcade stick, an Xbox pad) is its own.
+- **Video effects** — CRT scanlines and light noise over the picture *and*
+  the menu. Dials: *Scanlines* (strength), *Screen style* (horizontal,
+  vertical or grid), *Scanline style* (soft, medium or hard edges),
+  *Scanline thickness*, *Scanline spacing*, *Noise* and *Noise grain*. Dial
+  each in with ▲▼ while watching it change, ► to set, then *Save* - or start
+  from a preset (subtle, classic, heavy, arcade grid). The effects also cover
+  the guide channel (on Linux this needs a compositing desktop, which Steam
+  Deck, Bazzite and most desktops have). The player does it with a tiny GPU shader in mpv, so it costs
+  nothing to play back.
+- **Close FieldStation42** — stops the player, the web console and the menu
 
-Arrow keys move, Enter selects, Backspace/Escape go back. The keys work
-whether the video window or the menu has focus. The phone remote gets a D-pad
-for the same thing, and mirrors what the menu is showing.
+The menu is drawn like a VCR's on-screen display - on black, in the
+same face the channel banner uses when you flip channels: white text, a green bar on the selected line; ▲▼ move, ► (or
+Enter) sets, ◄ (or Escape/Backspace) ends. The keys work whether the video window or
+the menu has focus. The phone remote gets a D-pad for the same thing, and
+mirrors what the menu is showing.
 
-Anything the menu doesn't cover is still in the web console, whose address the
-menu shows on its first page.
+Anything the menu doesn't cover is in the web console; *Open web portal*
+takes you there, and the address on that row works from any device on your
+network.
 
 If the menu ever fails to appear on top of the video (a window-manager quirk),
 set `"menu_drop_fullscreen": true` in `main_config.json` and mpv will step out
 of fullscreen while the menu is open.
+
+The guide channel's process is started hidden as soon as the player is up
+and stays around between visits, and the grid reads only the 90 minutes it
+shows from the schedule database, so tuning to the guide takes about a second
+instead of a long wait on a big setup.
+
+A data folder carried over from another machine (a Pi, say) just works:
+catalog entries that name files by their old absolute path are found again
+under the new data folder, and a schedule that ended while the drive was in
+a drawer is thrown away and rebuilt from today instead of being extended a
+day at a time.
 
 If something isn't working, run `FieldStation42 doctor`. It reports where your
 data lives, which helper binaries it found, whether the guide channel and
@@ -169,6 +206,17 @@ iscc /DAppVersion=1.0.0 packaging\windows\FieldStation42.iss
 upstream release. CI (`.github/workflows/build.yml`) builds all of this for
 both platforms on every push and attaches it to releases on `v*` tags.
 
+## Data folder on another drive
+
+**Settings** in the web console (`http://localhost:4242/static/settings.html`)
+lets you point FieldStation42 at a different data folder — for example an
+external drive that already holds a `confs/` and `catalog/` from another
+machine. Type the path, **Check** shows what is there, **Use this folder**
+saves it, and **Restart FieldStation42** switches over without leaving the
+browser. The choice is stored in `launcher.json` in the default data folder;
+if the drive is not present at startup, that session falls back to the
+default folder. `FS42_HOME` in the environment overrides all of this.
+
 ## Configuration
 
 Station configs are JSON files in your data folder's `confs/`. Nine annotated
@@ -182,7 +230,13 @@ application settings; this fork adds a few:
 | `osd_backend` | `auto` | `mpv` or `none` |
 | `legacy_socket_files` | on for Linux | Mirror player status to `runtime/play_status.socket` for existing scripts |
 | `menu_drop_fullscreen` | `false` | Take mpv out of fullscreen while the on-screen menu is open |
-| `gamepad` | `false` | Poll a controller (XInput on Windows, `/dev/input/js*` on Linux) for menu navigation and channel changes |
+| `gamepad` | `false` | Poll a controller (XInput on Windows, `/dev/input/js*` on Linux) for menu navigation and channel changes; the menu's *Add input* page switches this on |
+| `controllers` | `[]` | Controllers set up by *Add input*: `[{"name", "device", "map": {"button_3": "menu", ...}}]`; functions are `up down left right select back menu` (up/down change channels while the menu is closed). A `device` of `"*"` applies to any controller without an entry |
+| `gamepad_map` | `{}` | Older single flat map; read as a catch-all controller |
+| `video_effects` | all off | `{"scanline_opacity": 0-1, "scanline_size": 2-16, "scanline_thickness": 1-8, "scanline_style": "soft"/"medium"/"hard", "scanline_pattern": "horizontal"/"vertical"/"grid", "noise_opacity": 0-1, "noise_grain": 1-4}`, set from the menu's *Video effects* page |
+| station `video_zoom` | `1.0` | Per-channel zoom (0.5-2.0), set from the station's *Picture* page along with upstream's `panscan` / `video_keepaspect` |
+| `prewarm_media` | `true` | Read the head and tail of what each channel plays next so the first tune to it is as quick as the second |
+| `schedule_agent` | `{"amount_to_add": "week", "trigger_add_at": "day"}` | Keep every schedule at least a day ahead, building in the background; `null` to turn off (upstream's default) |
 | `volume_step` | `5` | Percent per volume up/down press |
 
 Upstream's documentation at [fieldstation42.com](https://fieldstation42.com)

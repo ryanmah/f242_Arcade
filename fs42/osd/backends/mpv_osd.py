@@ -126,8 +126,16 @@ class _StatusElement:
             "\\shad1",
         ]
         if config.font:
-            tags.append(f"\\fn{os.path.splitext(os.path.basename(config.font))[0]}")
+            tags.append(f"\\fn{_font_family(config.font)}")
         return "{" + "".join(tags) + "}" + _escape(self.text)
+
+
+def _font_family(font: str) -> str:
+    """A family name as given, or derived from a font file's base name."""
+    base = os.path.basename(font)
+    if base.lower().endswith((".ttf", ".otf", ".ttc")):
+        return os.path.splitext(base)[0]
+    return font
 
 
 class _VolumeElement:

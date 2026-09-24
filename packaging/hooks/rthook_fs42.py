@@ -12,6 +12,34 @@ import sys
 if getattr(sys, "frozen", False):
     _base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
 
+    # A windowed (no-console) build has no standard streams at all:
+    # sys.stdout and sys.stderr are None.  print() tolerates that, but
+    # anything that calls .isatty(), .write() or .flush() on them crashes -
+    # uvicorn's log formatter does exactly that at startup.  Give every
+    # process real streams backed by a log file in the data folder, so the
+    # output is also somewhere a person can find it.
+    if sys.stdout is None or sys.stderr is None:
+        _stream = None
+        try:
+            if os.name == "nt":
+                _data = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local"),
+                                     "FieldStation42")
+            else:
+                _data = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
+                                     "fieldstation42")
+            _data = os.environ.get("FS42_HOME", _data)
+            _logs = os.path.join(_data, "logs")
+            os.makedirs(_logs, exist_ok=True)
+            _stream = open(os.path.join(_logs, "console.log"), "a", encoding="utf-8", errors="replace", buffering=1)
+        except OSError:
+            _stream = open(os.devnull, "w", encoding="utf-8")
+        if sys.stdout is None:
+            sys.stdout = _stream
+        if sys.stderr is None:
+            sys.stderr = _stream
+        sys.__stdout__ = sys.__stdout__ or sys.stdout
+        sys.__stderr__ = sys.__stderr__ or sys.stderr
+
     if os.name == "nt":
         _system = "windows"
     elif sys.platform == "darwin":

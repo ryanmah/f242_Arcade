@@ -92,7 +92,13 @@ def mpv_ipc_name(suffix=None) -> str:
     and a connection that never opens.  On POSIX it wants a real filesystem
     path.
     """
-    token = suffix if suffix is not None else os.getpid()
+    # PID alone is not unique enough: PIDs are reused, and an mpv left behind
+    # by a crashed session would still be serving the old name - the new
+    # player then talks to the wrong mpv and everything falls over as soon as
+    # that one goes away.  A random tail makes each session's endpoint its own.
+    import secrets
+
+    token = suffix if suffix is not None else f"{os.getpid()}-{secrets.token_hex(3)}"
     if IS_WINDOWS:
         return f"fs42-mpv-{token}"
     from fs42 import paths
@@ -222,3 +228,78 @@ def atomic_write_text(path, text: str, encoding="utf-8"):
         except OSError:
             pass
         raise
+
+
+# --------------------------------------------------------------------------
+# Keyboard focus (Windows)
+#
+# Windows refuses to let a background process bring a window to the front,
+# and every process here is "background" from its point of view: the user
+# double-clicked the supervisor, which spawned the player, which spawned mpv.
+# So the fullscreen video can come up without keyboard focus, and Escape,
+# the arrows and the number keys go to whatever had it before.  The usual
+# workaround - a synthetic Alt tap right before SetForegroundWindow - is what
+# focus_window_of_pid does.  On other platforms the window manager handles
+# this and the call is a no-op.
+# --------------------------------------------------------------------------
+
+def _windows_of_pid(pid: int):
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _lparam):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found
+
+
+def focus_window_of_pid(pid: int) -> bool:
+    """Bring the visible top-level window of ``pid`` to the foreground.
+
+    Returns True if a window was found and the foreground call succeeded.
+    """
+    if not IS_WINDOWS or not pid:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        windows = _windows_of_pid(pid)
+        if not windows:
+            return False
+        hwnd = windows[0]
+        VK_MENU, KEYEVENTF_KEYUP = 0x12, 0x0002
+        # The Alt tap makes Windows treat us as the input-owning process for
+        # the next foreground change.
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        ok = bool(user32.SetForegroundWindow(hwnd))
+        return ok
+    except Exception:
+        return False
+
+
+def focus_window_of_pid_soon(pid: int, attempts: int = 20, interval: float = 0.5):
+    """focus_window_of_pid on a background thread, retrying while the window
+    is still being created."""
+    if not IS_WINDOWS or not pid:
+        return
+    import threading
+    import time
+
+    def worker():
+        for _ in range(attempts):
+            if focus_window_of_pid(pid):
+                return
+            time.sleep(interval)
+
+    threading.Thread(target=worker, name="fs42-focus", daemon=True).start()

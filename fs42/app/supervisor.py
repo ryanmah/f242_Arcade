@@ -194,6 +194,11 @@ class Supervisor:
                     _l.info("Shutdown requested by a running component.")
                     break
 
+                restart = ipc.restart_requested()
+                if restart:
+                    self._restart_everything(restart.get("reason", "requested"))
+                    continue
+
                 now = time.monotonic()
                 if now - last_prune > 30:
                     ipc.prune()
@@ -222,6 +227,29 @@ class Supervisor:
             self._shutdown_children()
             self.lock.release()
         return 0
+
+    def _restart_everything(self, reason):
+        """Stop every component and start them again, re-reading the data
+        folder setting on the way - the one thing a running process cannot
+        change about itself."""
+        _l.info("Restart requested (%s).", reason)
+        ipc.clear_restart()
+        self._shutdown_children()
+        ipc.close()
+        paths.reset_cached_roots()
+        try:
+            self._preflight()
+        except Exception as e:
+            _l.exception(e)
+            _l.error("Startup checks failed after restart; carrying on with the previous data folder.")
+        info = paths.data_root_info()
+        _l.info("Data folder: %s (%s)", info["current"], info["source"])
+        for child in self.children:
+            child.stopped = False
+            child.retry_at = 0.0
+            child.backoff = BACKOFF_START
+            child.start()
+        _l.info("FieldStation42 restarted. Web console: http://localhost:%s", self._server_port())
 
     def _on_signal(self, signum):
         _l.info("Received signal %s - shutting down", signum)

@@ -138,7 +138,11 @@ def main():
     select_row("Delete it", settle=1.5)
     check("config removed", not conf.exists())
     time.sleep(8)
-    check("player retuned instead of crashing", status()[2] == "playing" and status()[0] != args.channel, str(status()))
+    # With other stations left it retunes; if that was the only one it goes
+    # back to the "no channels yet" static screen.  Either way it must not die.
+    after = status()
+    check("player retuned (or idled) instead of crashing",
+          (after[2] == "playing" and after[0] != args.channel) or after[2] == "no_channels", str(after))
     check("player process alive", subprocess.run(["pgrep", "-f", "fs42-role=player"], capture_output=True).returncode == 0)
 
     # ---- close and confirm normal input still works
@@ -148,7 +152,9 @@ def main():
     check("menu closed from Home", not get("/player/menu")["open"])
     get("/player/channels/up")
     time.sleep(4)
-    check("channel change still works", status()[2] == "playing", str(status()))
+    # With the only station gone the player idles on static; a channel change
+    # then has nowhere to go, which is fine.
+    check("channel change still works", status()[2] in ("playing", "no_channels"), str(status()))
     print("\nall menu checks passed")
 
 

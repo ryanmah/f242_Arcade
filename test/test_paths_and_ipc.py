@@ -129,3 +129,102 @@ def test_concurrent_writers_lose_nothing(fs42_home):
     while ipc.pop(ipc.TOPIC_CHANNEL, "drain") is not None:
         claimed += 1
     assert claimed == 100
+
+
+# ------------------------------------------------------- data root override
+
+def test_data_root_follows_launcher_settings(tmp_path, monkeypatch):
+    from fs42 import paths
+
+    default = tmp_path / "default"
+    other = tmp_path / "external"
+    default.mkdir()
+    other.mkdir()
+    monkeypatch.delenv("FS42_HOME", raising=False)
+    monkeypatch.setenv("FS42_DEFAULT_HOME", str(default))
+    paths.reset_cached_roots()
+
+    info = paths.data_root_info()
+    assert info["source"] == "default" and info["configured"] is None
+    assert paths.data() == default.resolve()
+
+    paths.set_data_root(other)
+    assert (default / "launcher.json").exists()
+    info = paths.data_root_info()
+    assert info["configured"] == str(other) and info["restart_required"] is True
+    assert paths.data() == default.resolve()  # unchanged until restart
+
+    paths.reset_cached_roots()
+    assert paths.data() == other.resolve()
+    assert paths.data_root_info()["source"] == "settings"
+
+    # A missing drive falls back to the default rather than failing.
+    other.rmdir()
+    paths.reset_cached_roots()
+    assert paths.data() == default.resolve()
+    assert paths.data_root_info()["configured_exists"] is False
+
+    paths.set_data_root(None)
+    assert "data_root" not in paths.read_launcher_settings()
+    paths.reset_cached_roots()
+
+
+def test_inspect_data_root_reports_layout(tmp_path):
+    from fs42 import paths
+
+    missing = paths.inspect_data_root(tmp_path / "nope")
+    assert not missing["exists"] and missing["problems"]
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert paths.inspect_data_root(empty)["empty"] is True
+
+    full = tmp_path / "full"
+    (full / "confs").mkdir(parents=True)
+    (full / "catalog").mkdir()
+    (full / "confs" / "a.json").write_text("{}")
+    (full / "confs" / "main_config.json").write_text("{}")
+    info = paths.inspect_data_root(full)
+    assert info["looks_like_fs42"] and info["station_configs"] == 1 and info["has_catalog"] and info["writable"]
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "holiday.jpg").write_text("x")
+    assert paths.inspect_data_root(junk)["problems"]
+
+
+def test_restart_request_round_trip(tmp_path):
+    from fs42 import ipc
+
+    ipc.set_db_path(tmp_path / "bus.db")
+    try:
+        assert ipc.restart_requested() is None
+        ipc.request_restart("settings")
+        assert ipc.restart_requested()["reason"] == "settings"
+        ipc.clear_restart()
+        assert ipc.restart_requested() is None
+    finally:
+        ipc.set_db_path(None)
+
+
+def test_locate_media_finds_files_moved_with_the_data_folder(tmp_path, monkeypatch):
+    from fs42 import paths
+
+    monkeypatch.setenv("FS42_HOME", str(tmp_path))
+    paths.reset_cached_roots()
+    paths._relocated.clear()
+    media = tmp_path / "catalog" / "NickTV" / "show" / "ep1.mp4"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"0")
+    try:
+        # As-is, relative to the data folder, and a Pi's absolute path.
+        assert paths.locate_media(str(media)) == str(media)
+        assert paths.locate_media("catalog/NickTV/show/ep1.mp4") == str(media)
+        assert paths.locate_media("/home/pi/FieldStation42/catalog/NickTV/show/ep1.mp4") == str(media)
+        assert paths.locate_media("C:\\Users\\bob\\FieldStation42\\catalog\\NickTV\\show\\ep1.mp4") == str(media)
+        # Unknown files come back untouched so the error names them.
+        assert paths.locate_media("/home/pi/FieldStation42/catalog/NickTV/show/gone.mp4").endswith("gone.mp4")
+        assert paths.locate_media(None) is None
+    finally:
+        paths.reset_cached_roots()
+        paths._relocated.clear()
