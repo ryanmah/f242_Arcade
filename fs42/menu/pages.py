@@ -398,6 +398,7 @@ class HomePage(ListPage):
             Row("Video effects", action=lambda: self.window.push(VideoEffectsPage(self.window))),
             Row(f"View: {'Fullscreen' if _fullscreen() else 'Windowed'}", action=self._toggle_view),
             Row(f"Captions: {'On' if _captions() else 'Off'}", action=self._toggle_captions),
+            Row("Check for updates", action=lambda: self.window.push(UpdatePage(self.window))),
             Row("Exit menu", action=self.window.close_menu),
             Row("Shutdown FS42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
         ]
@@ -440,6 +441,118 @@ class HomePage(ListPage):
             QTimer.singleShot(600, self.window.close_menu)
         else:
             self.say(f"No browser found - open http://{_lan_ip()}:{_web_port()} on any device", "warn")
+
+
+def _wrapped(text, tone="muted", width=30):
+    import textwrap
+
+    return [Row(line, tone=tone) for line in textwrap.wrap(str(text), max(12, width)) or [""]]
+
+
+class UpdatePage(ListPage):
+    """Check GitHub for a newer FieldStation42 and install it.
+
+    The check and the download run on threads (``fs42.updater``); a timer
+    folds their progress into the rows.
+    """
+
+    title = "Updates"
+    hint = HINT_CONFIRM
+
+    def __init__(self, window):
+        from fs42 import updater
+
+        self._updater = updater
+        self._info = None
+        self._lock = threading.Lock()
+        self._checked = None
+        super().__init__(window)
+        threading.Thread(target=self._check, name="fs42-update-check", daemon=True).start()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(250)
+
+    def _check(self):
+        info = self._updater.check()
+        with self._lock:
+            self._checked = info
+
+    def _tick(self):
+        with self._lock:
+            info, self._checked = self._checked, None
+        status = self._updater.job().status()
+        if info is not None:
+            self._info = info
+        elif status == getattr(self, "_last_status", None):
+            return
+        self._last_status = status
+        self.refresh()
+
+    def _chars(self) -> int:
+        """How many characters fit on a row (the font is monospaced)."""
+        s = self.scale
+        width = self.width() - 2 * int(36 * s) - int(24 * s) - int(12 * s)
+        advance = QFontMetrics(theme.font(26, scale=s)).horizontalAdvance("M") or 1
+        return max(12, width // advance) if width > 0 else 30
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh()
+
+    def build_rows(self):
+        wrap = lambda text, tone="muted": _wrapped(text, tone, self._chars())
+        current = self._updater.current_version()
+        job = self._updater.job().status()
+        state = job["state"]
+        if state in ("checking", "downloading", "verifying", "installing", "done"):
+            self.subtitle = f"INSTALLED: V{current}"
+            filled = int(round(job["progress"] * 20))
+            rows = [Row("[" + "#" * filled + "-" * (20 - filled) + f"] {int(job['progress'] * 100):>3}%", tone="accent")]
+            rows += wrap(job["message"] or "Working...")
+            if state in ("installing", "done"):
+                rows += wrap("FieldStation42 will close and start again by itself.")
+            return rows
+        if self._info is None:
+            self.subtitle = f"INSTALLED: V{current}"
+            return [Row("Checking GitHub...", tone="muted")]
+        info = self._info
+        self.subtitle = f"INSTALLED: V{current}" + (f"   LATEST: {info['latest']}" if info.get("latest") else "")
+        rows = []
+        if state == "error":
+            rows += wrap(job["error"], tone="bad")
+        if not info.get("ok"):
+            rows += wrap(info.get("error") or "Could not check for updates.", tone="warn")
+            rows.append(Row("Try again", action=self._recheck))
+            rows.append(Row("Back", action=self.window.pop))
+            return rows
+        if info.get("available"):
+            label = "Pull from GitHub and restart" if info.get("mode") == "git" else f"Download and install {info['latest']}"
+            rows.append(Row(label, action=self._install, tone="good"))
+            rows.append(Row("Not now", action=self.window.pop))
+            if info.get("notes"):
+                rows.append(Row("What's new:", tone="muted"))
+                for line in info["notes"].splitlines()[:12]:
+                    line = line.strip().lstrip("#*- ").strip()
+                    if line:
+                        rows += wrap(line)
+            return rows
+        rows += wrap(info.get("error") or "You're up to date.", tone="good" if not info.get("error") else "warn")
+        rows.append(Row("Check again", action=self._recheck))
+        rows.append(Row("Back", action=self.window.pop))
+        return rows
+
+    def _recheck(self):
+        self._info = None
+        self.refresh()
+        threading.Thread(target=self._check, name="fs42-update-check", daemon=True).start()
+
+    def _install(self):
+        self._updater.job().start(self._info)
+        self.refresh()
+
+    @property
+    def busy(self):
+        return self._updater.job().busy
 
 
 class ConfirmQuitPage(ListPage):

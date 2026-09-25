@@ -783,8 +783,28 @@ class StationPlayer:
         except Exception as e:
             self._l.debug(f"Could not show stream down OSD: {e}")
 
+    def _close_mpv(self):
+        if getattr(self, "_mpv_closed", False):
+            return
+        self._mpv_closed = True
+        try:
+            self.mpv.terminate()
+        except Exception as e:
+            self._l.debug("mpv terminate raised: %s", e)
+
     def shutdown(self):
         self.current_playing_file_path = None
+        # The picture goes first: everything below can take a few seconds
+        # (overlay and guide processes wind down), and a fullscreen mpv
+        # left up meanwhile - or for good, if this process is killed before
+        # it finishes - looks like FieldStation42 ignored the request.
+        if self.osd is not None:
+            try:
+                self.osd.close()
+            except Exception:
+                pass
+            self.osd = None
+        self._close_mpv()
         try:
             from fs42 import video_effects
 
@@ -838,10 +858,7 @@ class StationPlayer:
                 pass
             self.osd = None
 
-        try:
-            self.mpv.terminate()
-        except Exception as e:
-            self._l.debug("mpv terminate raised: %s", e)
+        self._close_mpv()
         platform_compat.terminate_ipc_endpoint(getattr(self, "ipc_endpoint", None))
 
     def update_filters(self):

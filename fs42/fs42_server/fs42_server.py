@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import os
+import re
 
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from fs42 import ipc
 from fs42 import paths
@@ -57,6 +58,61 @@ async def remote():
 @fapi.get('/favicon.ico', include_in_schema=False)
 async def favicon():
     return FileResponse(str(paths.static_dir() / "favicon.ico"))
+
+
+@fapi.middleware("http")
+async def _no_stale_pages(request, call_next):
+    """Make browsers re-check the console's pages and scripts.
+
+    Without this a browser that visited an older version keeps using its
+    cached common.js - and so never shows menu entries added since (the
+    Settings tab, for one).  Revalidation is cheap: unchanged files come
+    back as 304.
+    """
+    path = request.url.path
+    if path == "/" or path == "/remote" or path.endswith((".html", "/")):
+        # Pages are always sent in full: a 304 would keep an old, unstamped
+        # copy in use.  (Stamped pages carry no validators anyway.)
+        request.scope["headers"] = [
+            (k, v) for k, v in request.scope["headers"]
+            if k.lower() not in (b"if-none-match", b"if-modified-since")
+        ]
+    response = await call_next(request)
+    if not (path == "/" or path == "/remote" or path.startswith("/static/")):
+        return response
+    response.headers["Cache-Control"] = "no-cache"
+    if response.status_code != 200 or not response.headers.get("content-type", "").startswith("text/html"):
+        return response
+    # A page: stamp its scripts and stylesheets with the version, so a page
+    # never pairs with a common.js cached by an older install - headers
+    # alone cannot reach a copy the browser does not think to re-check.
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    body = stamp_assets(body, _asset_version())
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in ("content-length", "etag", "last-modified")}
+    fresh = Response(content=body, status_code=200, headers=headers)
+    # The first page after an upgrade also tells the browser to drop what it
+    # cached for this site (Chrome and Firefox honour it on localhost), so
+    # the other pages come back fresh too.
+    if request.cookies.get(_ASSET_COOKIE) != _asset_version():
+        fresh.headers["Clear-Site-Data"] = '"cache"'
+        fresh.set_cookie(_ASSET_COOKIE, _asset_version(), max_age=10 * 365 * 24 * 3600, samesite="lax")
+    return fresh
+
+
+_ASSET_COOKIE = "fs42_assets"
+_LOCAL_ASSET = re.compile(rb'((?:src|href)=")((?:/?static/|)[\w./-]+\.(?:js|css))(")')
+
+
+def _asset_version() -> str:
+    from fs42 import __version__
+
+    return __version__
+
+
+def stamp_assets(html: bytes, version: str) -> bytes:
+    """Add ?v=<version> to the page's own .js/.css references."""
+    tag = f"?v={version}".encode()
+    return _LOCAL_ASSET.sub(lambda m: m.group(1) + m.group(2) + tag + m.group(3), html)
 
 
 # Include routers from the api package

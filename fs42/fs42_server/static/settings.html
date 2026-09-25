@@ -149,6 +149,87 @@
             btn.disabled = false;
         }
 
+        // ------------------------------------------------------------ updates
+        let updateInfo = null;
+
+        function renderUpdate(info) {
+            updateInfo = info;
+            const btn = document.getElementById('btn-update-install');
+            document.getElementById('update-current').textContent = info.current || '';
+            const notes = document.getElementById('update-notes');
+            notes.style.display = 'none';
+            btn.style.display = 'none';
+            if (!info.ok) {
+                const link = info.page ? ` <a href="${esc(info.page)}" target="_blank">Releases page</a>` : '';
+                return setStatus('update-status', 'warn', esc(info.error) + link);
+            }
+            if (info.available) {
+                btn.style.display = 'inline-block';
+                btn.textContent = info.mode === 'git' ? 'Pull from GitHub and restart' : `Download and install ${info.latest}`;
+                if (info.notes) { notes.textContent = info.notes; notes.style.display = 'block'; }
+                return setStatus('update-status', 'ok', info.mode === 'git'
+                    ? `${esc(info.latest)} waiting on GitHub.`
+                    : `Version <strong>${esc(info.latest)}</strong> is available.`);
+            }
+            setStatus('update-status', 'ok', info.error ? esc(info.error)
+                : `You're up to date${info.latest ? ' (latest on GitHub: ' + esc(info.latest) + ')' : ''}.`);
+        }
+
+        async function checkUpdate() {
+            const btn = document.getElementById('btn-update-check');
+            btn.disabled = true;
+            setStatus('update-status', 'warn', 'Checking GitHub...');
+            try {
+                const response = await fetch('/settings/update/check', {cache: 'no-store'});
+                const info = await response.json();
+                renderUpdate(info);
+                if (info.job && ['checking', 'downloading', 'verifying', 'installing'].includes(info.job.state)) followUpdate();
+            } catch (e) {
+                setStatus('update-status', 'bad', 'Could not ask the server: ' + esc(e));
+            }
+            btn.disabled = false;
+        }
+
+        async function installUpdate() {
+            document.getElementById('btn-update-install').disabled = true;
+            document.getElementById('btn-update-check').disabled = true;
+            await fetch('/settings/update/install', {method: 'POST'});
+            followUpdate();
+        }
+
+        async function followUpdate() {
+            const bar = document.getElementById('update-progress');
+            const before = updateInfo ? updateInfo.current : null;
+            bar.style.display = 'block';
+            let lastState = '';
+            while (true) {
+                let job = null;
+                try {
+                    job = await (await fetch('/settings/update/status', {cache: 'no-store'})).json();
+                } catch (e) { /* restarting */ }
+                if (job) {
+                    if (before && job.version && job.version !== before) {
+                        bar.style.display = 'none';
+                        setStatus('update-status', 'ok', `Updated - now running ${esc(job.version)}. Reloading...`);
+                        setTimeout(() => location.reload(), 1500);
+                        return;
+                    }
+                    lastState = job.state;
+                    bar.value = job.progress || 0;
+                    if (job.state === 'error') {
+                        bar.style.display = 'none';
+                        document.getElementById('btn-update-install').disabled = false;
+                        document.getElementById('btn-update-check').disabled = false;
+                        return setStatus('update-status', 'bad', esc(job.error));
+                    }
+                    if (job.message) setStatus('update-status', 'warn', esc(job.message));
+                } else if (lastState === 'installing' || lastState === 'done') {
+                    setStatus('update-status', 'warn', 'Installing - FieldStation42 is restarting. This page reconnects on its own.');
+                }
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', async function () {
             window.fs42Common.initTheme();
             const content = `
@@ -186,6 +267,18 @@
                 </div>
 
                 <div class="fs42-card">
+                    <h2 style="margin-top:0">Updates</h2>
+                    <p class="fs42-muted">Installed: <strong>v<span id="update-current"></span></strong>.
+                    Checks GitHub for a newer release, downloads it and installs it. FieldStation42 closes and
+                    starts again on its own; your channels, catalogs and settings are kept.</p>
+                    <button id="btn-update-check" class="pure-button" onclick="checkUpdate()">Check for updates</button>
+                    <button id="btn-update-install" class="pure-button pure-button-primary" onclick="installUpdate()" style="display:none;"></button>
+                    <progress id="update-progress" max="1" value="0" style="display:none; width:100%; margin-top:1em;"></progress>
+                    <div id="update-status" class="fs42-status"></div>
+                    <pre id="update-notes" class="fs42-terminal" style="display:none; white-space:pre-wrap; max-height:14em; overflow:auto;"></pre>
+                </div>
+
+                <div class="fs42-card">
                     <h2 style="margin-top:0">Restart</h2>
                     <p class="fs42-muted">Stops and starts the player, the web console and the on-screen display. Needed after changing the data folder.</p>
                     <button id="btn-restart" class="pure-button pure-button-primary" onclick="restart()">Restart FieldStation42</button>
@@ -194,6 +287,7 @@
             `;
             document.body.innerHTML = await window.fs42Common.createPageLayout('Settings', content);
             await load();
+            checkUpdate();
         });
     </script>
 </body>

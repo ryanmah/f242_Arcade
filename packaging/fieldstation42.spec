@@ -113,6 +113,17 @@ if vendor.is_dir():
 else:
     print(f"[fs42] no vendored binaries for {PLATFORM}; the build will rely on mpv/ffprobe from the system")
 
+# python-build-standalone's _tkinter links libtcl9.0.so / libtcl9tk9.0.so by
+# bare name (no rpath), so PyInstaller cannot trace them and the guide
+# channel fails with "libtcl9.0.so: cannot open shared object file".
+# Ship them next to the other libraries.
+if PLATFORM.startswith("linux"):
+    import glob as _glob
+
+    for _lib in sorted(_glob.glob(os.path.join(sys.base_prefix, "lib", "libtcl*.so*"))):
+        binaries.append((_lib, "."))
+        print(f"[fs42] bundling {os.path.basename(_lib)} for tkinter")
+
 # imageio-ffmpeg ships its own ~75MB ffmpeg for moviepy.  Only bundle it when
 # we are not already shipping one.
 if not HAVE_VENDORED_FFMPEG:

@@ -112,6 +112,9 @@ Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: startup
 ; triggers the UAC prompt; the install carries on if the user declines.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#AppName}"" dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=private protocol=TCP localport=4242"; Verb: "runas"; Flags: shellexec runhidden waituntilterminated skipifdoesntexist; Tasks: firewall; StatusMsg: "Adding the Windows Firewall rule..."
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent
+; An update from inside the app runs Setup with /SILENT /relaunch=1: start
+; the new version again when it is done.
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: RelaunchRequested
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#AppName}"""; Verb: "runas"; Flags: shellexec runhidden waituntilterminated; RunOnceId: "RemoveFirewallRule"
@@ -130,6 +133,11 @@ var
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM FieldStation42.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM FieldStation42-debug.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

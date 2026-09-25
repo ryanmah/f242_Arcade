@@ -174,6 +174,7 @@ class StationManager(object):
                     "video_effects",
                     "prewarm_media",
                     "volume_step",
+                    "update_repo",
                 ]
 
                 for key in to_check:

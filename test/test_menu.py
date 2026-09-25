@@ -375,6 +375,58 @@ def test_quit_page_asks_the_supervisor_to_stop(home, qt_app):
     window.close()
 
 
+def test_update_page_offers_a_newer_release(home, qt_app, monkeypatch):
+    import time
+
+    from fs42 import updater
+    from fs42.menu import pages
+    from fs42.menu.app import _build_window
+
+    window = _build_window()()
+    assert "Check for updates" in [r.title for r in window.stack[-1].rows]
+    info = {"ok": True, "mode": "release", "current": "1.0.20", "latest": "1.0.21", "available": True,
+            "asset": {"name": "x.run", "url": "u", "size": 1}, "notes": "## Fixes\n- Shutdown closes the video"}
+    monkeypatch.setattr(updater, "check", lambda: info)
+    started = []
+    monkeypatch.setattr(updater.UpdateJob, "start", lambda self, i=None, on_launched=None: started.append(i))
+    page = pages.UpdatePage(window)
+    window.push(page)
+    for _ in range(40):
+        page._tick()
+        if page._info:
+            break
+        time.sleep(0.05)
+    titles = [r.title for r in page.rows]
+    assert titles[0] == "Download and install 1.0.21"
+    assert "Shutdown closes the video" in titles
+    page.rows[0].action()
+    assert started == [info]
+    window.close()
+
+
+def test_update_page_explains_a_failed_check(home, qt_app, monkeypatch):
+    import time
+
+    from fs42 import updater
+    from fs42.menu import pages
+    from fs42.menu.app import _build_window
+
+    window = _build_window()()
+    monkeypatch.setattr(updater, "check", lambda: {"ok": False, "mode": "release", "current": "1.0.20",
+                                                   "error": "No release is published at github.com/x/y/releases yet"})
+    page = pages.UpdatePage(window)
+    window.push(page)
+    for _ in range(40):
+        page._tick()
+        if page._info:
+            break
+        time.sleep(0.05)
+    titles = [r.title for r in page.rows]
+    assert any("No release is published" in t for t in titles)
+    assert "Try again" in titles and "Back" in titles
+    window.close()
+
+
 # -------------------------------------------------------------- guide paths
 
 @pytest.fixture

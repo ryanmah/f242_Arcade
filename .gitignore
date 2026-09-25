@@ -200,3 +200,6 @@ artifacts/
 # Windows build done under Wine
 dist-win/
 build-win/
+/dist-linux/
+/build-linux/
+/.fs42_version

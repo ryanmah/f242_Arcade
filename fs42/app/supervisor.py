@@ -35,6 +35,7 @@ class Child:
         self.restart = restart
         self.max_failures = max_failures
         self.process = None
+        self.pgid = None
         self.started_at = 0.0
         self.backoff = BACKOFF_START
         self.retry_at = 0.0
@@ -56,8 +57,50 @@ class Child:
             # but do not pop a window for the headless workers.
             if self.role in ("api", "cli"):
                 kwargs["creationflags"] = platform_compat.CREATE_NO_WINDOW
+        else:
+            # Each child leads its own process group, and everything it
+            # starts (mpv, the menu, the guide, the overlays) joins that
+            # group.  Stopping the child then stops all of them: before this
+            # a player that was killed rather than exiting left mpv behind,
+            # fullscreen and on top of everything (seen on SteamOS).
+            kwargs["start_new_session"] = True
         self.process = subprocess.Popen(self.argv, **kwargs)
+        self.pgid = self.process.pid if not platform_compat.IS_WINDOWS else None
         self.started_at = time.monotonic()
+
+    def _signal_group(self, sig) -> bool:
+        """Send a signal to the child's whole process group (POSIX only).
+
+        Returns False once nothing is left in the group."""
+        if not self.pgid:
+            return False
+        try:
+            os.killpg(self.pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception as e:
+            _l.debug("Could not signal %s's process group: %s", self.role, e)
+            return False
+
+    def reap_group(self, timeout=TERMINATE_SECONDS):
+        """Stop anything the child left running after it went away."""
+        if not self.pgid:
+            return
+        import signal
+
+        if not self._signal_group(signal.SIGTERM):
+            self.pgid = None
+            return
+        _l.info("Stopping processes %s left behind", self.role)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            if not self._signal_group(0):
+                self.pgid = None
+                return
+        self._signal_group(signal.SIGKILL)
+        self.pgid = None
 
     def note_exit(self, code):
         uptime = time.monotonic() - self.started_at
@@ -70,6 +113,9 @@ class Child:
             self.failures += 1
             _l.warning("%s exited with code %s after %.0fs", self.role, code, uptime)
         self.process = None
+        # A player that crashed must not leave its mpv running under the
+        # one that replaces it.
+        self.reap_group()
 
     def should_restart(self, code) -> bool:
         if self.stopped or self.restart == "never":
@@ -93,6 +139,7 @@ class Child:
     def stop(self, timeout=TERMINATE_SECONDS):
         self.stopped = True
         if not self.alive:
+            self.reap_group(timeout)
             return
         try:
             self.process.terminate()
@@ -106,6 +153,7 @@ class Child:
                 pass
         except Exception as e:
             _l.debug("Error stopping %s: %s", self.role, e)
+        self.reap_group(timeout)
 
 
 class Supervisor:

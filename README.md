@@ -70,6 +70,21 @@ install on either platform. The single-file build unpacks itself on every
 launch, which costs a few seconds of startup; the installed and folder builds
 start instantly.
 
+### Updating
+
+*Menu → Check for updates*, or *Settings → Updates* in the web console. It
+asks GitHub for the latest release of `ryanmah/f242_Arcade` (change it with
+`"update_repo"` in `main_config.json`), downloads this platform's installer,
+checks it and runs it; FieldStation42 closes and starts again by itself.
+Channels, catalogs and settings are kept. A source checkout does a
+`git pull --ff-only` and restarts instead.
+
+A release is any GitHub release tagged `v<version>` that carries either the
+single-file installers the Build workflow publishes, or the split files from
+a local build: `FieldStation42-setup.exe` + `FieldStation42-setup-N.bin`
+(Windows) and `FieldStation42-steamos.partNN` + `FieldStation42-steamos.sha256`
+(SteamOS/Linux). The repository's releases must be public.
+
 ### Uninstalling
 
 Windows: *Apps → Installed apps → FieldStation42*, or the Start Menu entry. The
@@ -159,6 +174,8 @@ catalog entries that name files by their old absolute path are found again
 under the new data folder, and a schedule that ended while the drive was in
 a drawer is thrown away and rebuilt from today instead of being extended a
 day at a time.
+
+The web console's title bar shows the version that is running.
 
 If something isn't working, run `FieldStation42 doctor`. It reports where your
 data lives, which helper binaries it found, whether the guide channel and

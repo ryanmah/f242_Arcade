@@ -88,3 +88,32 @@ async def restart():
 @router.get("/ping")
 async def ping():
     return {"status": "ok", "version": paths.app_version(), "data_root": str(paths.data())}
+
+
+# ------------------------------------------------------------------ updates
+
+@router.get("/update/check")
+async def update_check():
+    """Compare this copy with the latest GitHub release (or branch)."""
+    import asyncio
+
+    from fs42 import updater
+
+    result = await asyncio.to_thread(updater.check)
+    result["job"] = updater.job().status()
+    return result
+
+
+@router.post("/update/install")
+async def update_install():
+    """Download and run the update in the background; poll /update/status."""
+    from fs42 import updater
+
+    return updater.job().start()
+
+
+@router.get("/update/status")
+async def update_status():
+    from fs42 import updater
+
+    return {"version": paths.app_version(), **updater.job().status()}

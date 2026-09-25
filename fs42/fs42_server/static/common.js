@@ -42,9 +42,15 @@ async function createMainMenu() {
         // Don't show player menu if we can't connect
     }
 
+    let version = '';
+    try {
+        const ping = await fetch('/settings/ping', {cache: 'no-store'});
+        if (ping.ok) version = (await ping.json()).version || '';
+    } catch (error) { /* older server: no version to show */ }
+
     return `
         <div class="pure-menu pure-menu-horizontal custom-menu" id="mainMenu">
-            <a href="#" class="pure-menu-heading">FieldStation42</a>
+            <a href="#" class="pure-menu-heading">FieldStation42${version ? ' <small style="opacity:.6">v' + version + '</small>' : ''}</a>
             <span class="menu-toggle" onclick="window.fs42Common.toggleMenu()">&#9776;</span>
             <ul class="pure-menu-list">
                 <li class="pure-menu-item"><a href="/" class="pure-menu-link">Home</a></li>
