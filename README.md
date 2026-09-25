@@ -112,7 +112,7 @@ gamepad) to manage channels without leaving the TV:
 - **Rebuild all catalogs** / **Add a week to all schedules**
 - **Open web portal** — opens the web console in your browser and gets out
   of its way
-- **Add input** — set up controllers, each with its own button layout.
+- **Remote Controls** — set up controllers, each with its own button layout.
   *Add a controller*, press any button on it so FieldStation42 knows which
   one you mean, then pick a function and press the button you want for it
   (or *Map every button in order* and follow along) and Save. That turns the
@@ -130,7 +130,9 @@ gamepad) to manage channels without leaving the TV:
   the guide channel (on Linux this needs a compositing desktop, which Steam
   Deck, Bazzite and most desktops have). The player does it with a tiny GPU shader in mpv, so it costs
   nothing to play back.
-- **Close FieldStation42** — stops the player, the web console and the menu
+- **View** — switch between fullscreen and a window (remembered)
+- **Exit menu** — back to TV
+- **Shutdown FS42** — stops the player, the web console and the menu
 
 The menu is drawn like a VCR's on-screen display - on black, in the
 same face the channel banner uses when you flip channels: white text, a green bar on the selected line; ▲▼ move, ► (or
@@ -230,11 +232,13 @@ application settings; this fork adds a few:
 | `osd_backend` | `auto` | `mpv` or `none` |
 | `legacy_socket_files` | on for Linux | Mirror player status to `runtime/play_status.socket` for existing scripts |
 | `menu_drop_fullscreen` | `false` | Take mpv out of fullscreen while the on-screen menu is open |
-| `gamepad` | `false` | Poll a controller (XInput on Windows, `/dev/input/js*` on Linux) for menu navigation and channel changes; the menu's *Add input* page switches this on |
-| `controllers` | `[]` | Controllers set up by *Add input*: `[{"name", "device", "map": {"button_3": "menu", ...}}]`; functions are `up down left right select back menu` (up/down change channels while the menu is closed). A `device` of `"*"` applies to any controller without an entry |
+| `gamepad` | `false` | Poll a controller (XInput on Windows, `/dev/input/js*` on Linux) for menu navigation and channel changes; the menu's *Remote Controls* page switches this on |
+| `controllers` | `[]` | Controllers set up by *Remote Controls*: `[{"name", "device", "map": {"button_3": "menu", ...}}]`; functions are `up down left right select back menu` (up/down change channels while the menu is closed). A `device` of `"*"` applies to any controller without an entry |
 | `gamepad_map` | `{}` | Older single flat map; read as a catch-all controller |
 | `video_effects` | all off | `{"scanline_opacity": 0-1, "scanline_size": 2-16, "scanline_thickness": 1-8, "scanline_style": "soft"/"medium"/"hard", "scanline_pattern": "horizontal"/"vertical"/"grid", "noise_opacity": 0-1, "noise_grain": 1-4}`, set from the menu's *Video effects* page |
 | station `video_zoom` | `1.0` | Per-channel zoom (0.5-2.0), set from the station's *Picture* page along with upstream's `panscan` / `video_keepaspect` |
+| osd.json status `anchor` / `x_offset_px` | `"4:3"` / `30` | The channel banner is placed `x_offset_px` (1080p pixels) in from the edge of a centred 4:3 picture, so it sits in the same spot over 4:3 and 16:9 video; `"screen"` restores upstream's `x_margin` placement |
+| `fullscreen` | `true` | Fullscreen or windowed video; the menu's *View* row toggles it |
 | `prewarm_media` | `true` | Read the head and tail of what each channel plays next so the first tune to it is as quick as the second |
 | `schedule_agent` | `{"amount_to_add": "week", "trigger_add_at": "day"}` | Keep every schedule at least a day ahead, building in the background; `null` to turn off (upstream's default) |
 | `volume_step` | `5` | Percent per volume up/down press |

@@ -221,7 +221,19 @@ def atomic_write_text(path, text: str, encoding="utf-8"):
     try:
         with os.fdopen(fd, "w", encoding=encoding) as handle:
             handle.write(text)
-        os.replace(temporary, path)
+        # On Windows the swap fails with a PermissionError while any other
+        # process (the player, the web console) has the file open for
+        # reading; those opens last milliseconds, so wait them out.
+        for attempt in range(40):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if not IS_WINDOWS or attempt == 39:
+                    raise
+                import time
+
+                time.sleep(0.05)
     except BaseException:
         try:
             os.unlink(temporary)

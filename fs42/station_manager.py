@@ -51,6 +51,8 @@ class StationManager(object):
                     # Off by default; the escape hatch for a window manager
                     # that will not put the menu above fullscreen video.
                     "menu_drop_fullscreen": False,
+                    # The menu's "View" toggle: fullscreen or a window.
+                    "fullscreen": True,
                     # Poll a gamepad for menu navigation and channel changes.
                     "gamepad": False,
                     # Read the head and tail of what each channel plays next
@@ -162,6 +164,7 @@ class StationManager(object):
                     "legacy_socket_files",
                     # in-app menu
                     "menu_drop_fullscreen",
+                    "fullscreen",
                     "gamepad",
                     "gamepad_map",
                     "controllers",

@@ -7,6 +7,7 @@ from a keyboard, the phone remote and a gamepad alike.
 """
 
 import logging
+import os
 import socket
 import threading
 import webbrowser
@@ -285,6 +286,50 @@ def _station_summary(station):
     return " · ".join(parts)
 
 
+def _station_summaries() -> dict:
+    """name -> "142 clips · sched to 2026-10-01", read with two SQL queries.
+
+    The old per-station path loaded every catalog entry and every schedule
+    block into memory just to count them, which took seconds.
+    """
+    import sqlite3
+
+    from fs42.station_manager import StationManager
+
+    manager = StationManager()
+    manager.reload_if_changed()
+    counts, ends = {}, {}
+    db_path = manager.server_conf.get("db_path")
+    if db_path and os.path.exists(db_path):
+        connection = sqlite3.connect(db_path, timeout=5)
+        try:
+            try:
+                counts = dict(connection.execute(
+                    "SELECT station, COUNT(*) FROM catalog_entries GROUP BY station").fetchall())
+            except sqlite3.Error:
+                pass
+            try:
+                ends = dict(connection.execute(
+                    "SELECT station, MAX(end_time) FROM liquid_blocks GROUP BY station").fetchall())
+            except sqlite3.Error:
+                pass
+        finally:
+            connection.close()
+    out = {}
+    for station in manager.stations:
+        name = station["network_name"]
+        parts = []
+        if station.get("_has_catalog"):
+            parts.append(f"{counts.get(name, 0)} clips" if name in counts else "no catalog")
+        if station.get("_has_schedule"):
+            end = ends.get(name)
+            parts.append(f"sched to {str(end)[:10]}" if end else "no schedule")
+        if station.get("hidden"):
+            parts.append("hidden")
+        out[name] = " · ".join(parts)
+    return out
+
+
 def _lan_ip():
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -301,6 +346,31 @@ def send_player(command: dict):
 
 
 # ================================================================== pages
+
+def _read_main_config():
+    import json
+
+    try:
+        with open(paths.confs("main_config.json")) as f:
+            config = json.load(f)
+        return config if isinstance(config, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_main_config_key(key, value):
+    import json
+
+    from fs42.platform_compat import atomic_write_text
+
+    config = _read_main_config()
+    config[key] = value
+    atomic_write_text(paths.confs("main_config.json"), json.dumps(config, indent=4))
+
+
+def _fullscreen() -> bool:
+    return bool(_read_main_config().get("fullscreen", True))
+
 
 def _web_port():
     from fs42.station_manager import StationManager
@@ -319,12 +389,25 @@ class HomePage(ListPage):
             Row("Stations", action=lambda: self.window.push(StationsPage(self.window))),
             Row("Rebuild all catalogs", action=lambda: self.window.push(ProgressPage(self.window, "Rebuilding catalogs", lambda log: _jobs().rebuild_catalog("all", log), reload_stations=True))),
             Row("Add a week to all schedules", action=lambda: self.window.push(ProgressPage(self.window, "Adding a week", lambda log: _jobs().add_schedule_time("week", "all", log)))),
-            Row("Open web portal", value=f"http://{_lan_ip()}:{_web_port()}", action=self._open_web_portal),
-            Row("Add input", value="controllers", action=lambda: self.window.push(ControllersPage(self.window))),
-            Row("Video effects", value="scanlines / noise", action=lambda: self.window.push(VideoEffectsPage(self.window))),
-            Row("Close menu", action=self.window.close_menu),
-            Row("Close FieldStation42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
+            Row("Open web portal", action=self._open_web_portal),
+            Row("Remote Controls", action=lambda: self.window.push(ControllersPage(self.window))),
+            Row("Video effects", action=lambda: self.window.push(VideoEffectsPage(self.window))),
+            Row(f"View: {'Fullscreen' if _fullscreen() else 'Windowed'}", action=self._toggle_view),
+            Row("Exit menu", action=self.window.close_menu),
+            Row("Shutdown FS42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
         ]
+
+    def _toggle_view(self):
+        """Switch the video between fullscreen and a window, and remember it."""
+        fullscreen = not _fullscreen()
+        try:
+            _save_main_config_key("fullscreen", fullscreen)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        send_player({"command": "view", "fullscreen": fullscreen})
+        self.refresh()
+        self.say("FULLSCREEN" if fullscreen else "WINDOWED", "good")
 
     def _open_web_portal(self):
         """Open the web console in the default browser and get out of its way."""
@@ -344,7 +427,7 @@ class HomePage(ListPage):
 
 
 class ConfirmQuitPage(ListPage):
-    title = "Close FieldStation42"
+    title = "Shutdown FS42"
     hint = HINT_CONFIRM
 
     def build_rows(self):
@@ -367,14 +450,62 @@ def _jobs():
 
 
 class StationsPage(ListPage):
+    """The channel list.
+
+    Opens at once with a LOADING line and fills in when the per-station
+    numbers (clip counts, how far each schedule runs) have been read on a
+    background thread - on a big setup that takes a moment, and the menu
+    should never look frozen.
+    """
+
     title = "Stations"
     subtitle = "Pick a station, or add one from a folder of media"
+
+    def __init__(self, window):
+        self._summaries = None          # name -> summary text, once loaded
+        self._loading = False
+        self._result = None
+        self._lock = threading.Lock()
+        super().__init__(window)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._collect)
+        self._timer.start(100)
+
+    def on_show(self):
+        super().on_show()
+        self._start_loading()
+
+    def _start_loading(self):
+        if self._loading:
+            return
+        self._loading = True
+
+        def work():
+            try:
+                result = _station_summaries()
+            except Exception as e:
+                _l.exception(e)
+                result = {}
+            with self._lock:
+                self._result = result
+
+        threading.Thread(target=work, name="fs42-stations", daemon=True).start()
+
+    def _collect(self):
+        with self._lock:
+            result, self._result = self._result, None
+        if result is not None:
+            self._summaries = result
+            self._loading = False
+            self.refresh()
 
     def build_rows(self):
         from fs42.station_manager import StationManager
 
-        # Pick up anything the web console changed while we were open.
-        StationManager().reload_if_changed()
+        if self._summaries is None:
+            self.subtitle = "LOADING STATIONS..."
+            return [Row("Loading...", tone="muted")]
+        self.subtitle = "Pick a station, or add one from a folder of media"
         playing = (ipc.get_status() or {}).get("network_name")
         rows = []
         for station in StationManager().stations:
@@ -382,7 +513,7 @@ class StationsPage(ListPage):
             marker = "▶ " if name == playing else ""
             rows.append(Row(
                 f"{station['channel_number']:>3}   {marker}{name}",
-                value=_station_summary(station),
+                value=self._summaries.get(name, ""),
                 action=lambda s=station: self.window.push(StationDetailPage(self.window, s["network_name"])),
                 tone="accent" if name == playing else "normal",
                 data=station,
@@ -911,7 +1042,7 @@ class EffectPresetsPage(ListPage):
 class ControllersPage(ListPage):
     """The controllers that have been set up, and a way to add another."""
 
-    title = "Add input"
+    title = "Remote Controls"
     hint = HINT_LIST
 
     def __init__(self, window):

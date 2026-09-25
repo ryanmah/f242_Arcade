@@ -86,6 +86,9 @@ def _handle_player_command(q_message):
             return PlayerOutcome(PlayerState.SUCCESS, "menu:open")
         case "reload_input":
             return PlayerOutcome(PlayerState.SUCCESS, "input:reload")
+        case "view":
+            fullscreen = bool(q_message.get("fullscreen", True))
+            return PlayerOutcome(PlayerState.SUCCESS, "view:" + ("fullscreen" if fullscreen else "windowed"))
         case "picture":
             return PlayerOutcome(PlayerState.SUCCESS, "picture:" + json.dumps(
                 {"network_name": q_message.get("network_name"), "values": q_message.get("values")}))
@@ -228,10 +231,10 @@ def main_loop(transition_fn, shutdown_queue=None, api_proc=None, schedule_lock=N
     if schedule_lock:
         player.schedule_lock = schedule_lock
     player.attach_osd()
-    stand_by = StationManager().server_conf.get("standby_image", str(paths.runtime("standby.png")))
     reception.degrade()
     player.update_filters()
-    player.play_file(stand_by)
+    # No standby card at start-up: the window stays black until the first
+    # channel is ready and then fades in (StationPlayer._startup_fade).
 
     player.load_up()
 

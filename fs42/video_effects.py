@@ -150,10 +150,9 @@ def save(values) -> dict:
         config = {}
     config[CONFIG_KEY] = values
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w") as f:
-        json.dump(config, f, indent=4)
-    os.replace(tmp, path)
+    from fs42.platform_compat import atomic_write_text
+
+    atomic_write_text(path, json.dumps(config, indent=4))
     return values
 
 

@@ -79,6 +79,42 @@ def _anchor(halign: HAlignment, valign: VAlignment, x_margin: float, y_margin: f
     return x, y
 
 
+def _picture_left(window_aspect) -> float:
+    """Canvas x of the left edge of a 4:3 picture centred in the window.
+
+    The ASS canvas (CANVAS_W x CANVAS_H) is stretched over the whole window,
+    so the 4:3 area's share of the canvas width depends on the window's own
+    aspect ratio: all of it on a 4:3 screen, three quarters on 16:9.
+    """
+    try:
+        aspect = float(window_aspect)
+    except (TypeError, ValueError):
+        aspect = CANVAS_W / CANVAS_H
+    if aspect <= 4.0 / 3.0:
+        return 0.0
+    share = (4.0 / 3.0) / aspect
+    return CANVAS_W * (1.0 - share) / 2.0
+
+
+def _px_to_canvas_x(pixels_1080, window_aspect) -> float:
+    """A horizontal distance given in 1080p screen pixels, in canvas units."""
+    try:
+        aspect = float(window_aspect)
+    except (TypeError, ValueError):
+        aspect = CANVAS_W / CANVAS_H
+    # One screen pixel at 1080p is 1/1080 of the height; the canvas width
+    # spans aspect * 1080 of those.
+    return pixels_1080 * CANVAS_W / (aspect * 1080.0)
+
+
+def _status_x(config, window_aspect) -> float:
+    if str(getattr(config, "anchor", "screen")).lower() != "4:3" or config.halign == HAlignment.CENTER:
+        x, _ = _anchor(config.halign, config.valign, config.x_margin, config.y_margin)
+        return x
+    left = _picture_left(window_aspect) + _px_to_canvas_x(config.x_offset_px, window_aspect)
+    return left if config.halign == HAlignment.LEFT else CANVAS_W - left
+
+
 class _StatusElement:
     """A line of text driven by the player's status payload."""
 
@@ -87,6 +123,8 @@ class _StatusElement:
         self.text = ""
         self.time_since_change = float("inf")
         self.last_status = None
+        # Seconds to stay up regardless of display_time (the start-up fade).
+        self.hold_for = 0.0
 
     def update(self, dt, status):
         self.time_since_change += dt
@@ -100,18 +138,20 @@ class _StatusElement:
         rendered = self.config.format_text.format_map(defaultdict(str, status))
         if rendered != self.text or changed:
             self.time_since_change = -self.config.delay
+            self.hold_for = 0.0
             if rendered:
                 self.text = rendered
 
-    def render(self):
-        if not self.text or self.time_since_change >= self.config.display_time:
+    def render(self, window_aspect=None):
+        if not self.text or self.time_since_change >= max(self.config.display_time, self.hold_for):
             return None
         if self.time_since_change < 0:
             return None
 
         config = self.config
         colour, alpha = _ass_color(config.text_color)
-        x, y = _anchor(config.halign, config.valign, config.x_margin, config.y_margin)
+        _, y = _anchor(config.halign, config.valign, config.x_margin, config.y_margin)
+        x = _status_x(config, window_aspect)
         # font_size was pixels against the real framebuffer; scale it onto the
         # virtual canvas so it looks the same at any output resolution.
         size = max(1, int(config.font_size * config.expansion_factor * (CANVAS_H / 1080.0)))
@@ -411,16 +451,57 @@ class MpvOSD(OSDBackend):
 
         self._draw_ass()
 
+    # ------------------------------------------------------ fade from black
+
+    def cover(self):
+        """Paint the whole picture black until fade_in() is called."""
+        self._fade_start = None
+        self._fade_len = 0.0
+        self._covered = True
+        self._draw_ass()
+
+    def fade_in(self, seconds):
+        """Lift the black cover over ``seconds``; the channel banner shows throughout."""
+        self._covered = True
+        self._fade_start = time.monotonic()
+        self._fade_len = max(0.01, float(seconds))
+        for element in self.status_elements:
+            # Restart the banner's clock so it stays up for the whole fade.
+            element.time_since_change = 0.0
+            element.hold_for = self._fade_len + 0.5
+        self._draw_ass()
+
+    def _fade_part(self):
+        if not getattr(self, "_covered", False):
+            return None
+        if self._fade_start is None:
+            opacity = 1.0
+        else:
+            t = (time.monotonic() - self._fade_start) / self._fade_len
+            if t >= 1.0:
+                self._covered = False
+                return None
+            opacity = 1.0 - t * t * (3.0 - 2.0 * t)      # ease in and out
+        alpha = 255 - int(round(255 * opacity))
+        return (
+            "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H000000&\\1a&H%02X&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}"
+            % (alpha, CANVAS_W, CANVAS_W, CANVAS_H, CANVAS_H)
+        )
+
     def _draw_ass(self):
         parts = []
+        cover = self._fade_part()
+        if cover:
+            parts.append(cover)
         for element in self.volume_elements:
             rendered = element.render()
             if rendered:
                 parts.append(rendered)
         # Status text last so it sits above the meter, matching upstream's
         # explicit "StatusDisplay on top" draw order.
+        aspect = self._window_aspect()
         for element in self.status_elements:
-            rendered = element.render()
+            rendered = element.render(aspect)
             if rendered:
                 parts.append(rendered)
 
@@ -440,6 +521,21 @@ class MpvOSD(OSDBackend):
             )
         except Exception as e:
             _l.debug("osd-overlay failed: %s", e)
+
+    def _window_aspect(self):
+        """The mpv window's width/height, re-read every couple of seconds."""
+        now = time.monotonic()
+        if getattr(self, "_aspect_checked", 0.0) + 2.0 > now:
+            return getattr(self, "_aspect", CANVAS_W / CANVAS_H)
+        self._aspect_checked = now
+        try:
+            width = float(self.mpv.osd_width or 0)
+            height = float(self.mpv.osd_height or 0)
+            if width > 0 and height > 0:
+                self._aspect = width / height
+        except Exception:
+            pass
+        return getattr(self, "_aspect", CANVAS_W / CANVAS_H)
 
     def close(self):
         for element in self.logo_elements:

@@ -39,8 +39,13 @@ class StatusDisplayConfig(BaseModel):
     # A font family name, or a font file whose base name is the family.  The
     # default is the menu's VCR face, which the player hands to mpv.
     font: str | None = "VCR OSD Mono"
-    # 0.12 sits the channel banner a fifth further in from the side than
-    # upstream's 0.1, clear of the curve of a CRT or a TV's overscan.
+    # Where the banner's horizontal position is measured from:
+    #   "4:3"    - the edge of a 4:3 picture centred on the screen, so the
+    #              banner sits in the same place over 4:3 and 16:9 video
+    #              (x_offset_px from that edge, in 1080p pixels);
+    #   "screen" - upstream's behaviour, x_margin of the whole screen.
+    anchor: str = "4:3"
+    x_offset_px: float = 30.0
     x_margin: float = 0.12
     y_margin: float = 0.1
     delay: float = 0.0

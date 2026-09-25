@@ -48,6 +48,9 @@ from fs42.slot_reader import SlotReader
 logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO)
 
 
+STARTUP_FADE_SECONDS = 3.0
+
+
 def _guide_channel_runner():
     from fs42.guide_tk import guide_channel_runner
 
@@ -202,7 +205,10 @@ class StationPlayer:
                 "start_mpv": start_it,
                 "ipc_socket": self.ipc_endpoint,
                 "input_default_bindings": False,
-                "fs": True,
+                # "View: Fullscreen / Windowed" on the menu.
+                "fs": bool(StationManager().server_conf.get("fullscreen", True)),
+                # A window, when there is one, never bigger than the screen.
+                "autofit_larger": "80%x80%",
                 "idle": True,
                 "force_window": True,
                 "script_opts": "osc-idlescreen=no",
@@ -253,6 +259,10 @@ class StationPlayer:
         self.osd = None
         self.menu_process = None
         self._menu_fullscreen_dropped = False
+        self._fullscreen = bool(StationManager().server_conf.get("fullscreen", True))
+        # Fade the very first picture in from black instead of flashing the
+        # standby card at start-up.
+        self._startup_fade = True
         self._gamepad = None
         if StationManager().server_conf.get("gamepad"):
             self._start_gamepad()
@@ -549,7 +559,7 @@ class StationPlayer:
         self._focus_video_window()
         if self._menu_fullscreen_dropped:
             try:
-                self.mpv.fs = True
+                self.mpv.fs = self._fullscreen
             except Exception:
                 pass
             self._menu_fullscreen_dropped = False
@@ -637,6 +647,20 @@ class StationPlayer:
             and response.payload == "input:reload"
         ):
             self._restart_gamepad()
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and isinstance(response.payload, str)
+            and response.payload.startswith("view:")
+        ):
+            self._fullscreen = response.payload.split(":", 1)[1] == "fullscreen"
+            try:
+                self.mpv.fs = self._fullscreen
+            except Exception as e:
+                self._l.warning("Could not change the view: %s", e)
+            self._l.info("View: %s", "fullscreen" if self._fullscreen else "windowed")
             return True
 
         if (
@@ -874,6 +898,13 @@ class StationPlayer:
 
                 # self.mpv.vf = "lavfi=[]"
                 self._l.info(f"playing {file_path}")
+                fading = self._startup_fade and self.osd is not None and hasattr(self.osd, "cover")
+                if fading:
+                    # Black until the first frame is ready, then fade up.
+                    try:
+                        self.osd.cover()
+                    except Exception:
+                        fading = False
                 self.mpv.command("playlist-clear")
                 self.mpv.play(file_path)
                 
@@ -905,6 +936,13 @@ class StationPlayer:
                 # Perform seek if needed (before showing overlay)
                 if not is_stream and offset_seconds is not None and offset_seconds > 0:
                     self._seek_with_verify(file_path, offset_seconds, timeout_seconds)
+
+                if fading:
+                    self._startup_fade = False
+                    try:
+                        self.osd.fade_in(STARTUP_FADE_SECONDS)
+                    except Exception as e:
+                        self._l.debug("fade-in failed: %s", e)
 
                 # Show Now Playing overlay for audio feature files
                 self._l.info(f"Media type: {media_type}, Content type: {content_type}")

@@ -228,3 +228,48 @@ def test_locate_media_finds_files_moved_with_the_data_folder(tmp_path, monkeypat
     finally:
         paths.reset_cached_roots()
         paths._relocated.clear()
+
+
+def test_station_config_overwrites_on_windows_semantics(tmp_path, monkeypatch):
+    """os.rename refuses to overwrite on Windows ([WinError 183]); writes must not use it."""
+    import json
+    import os
+
+    from fs42.station_io import StationIO
+
+    def windows_rename(src, dst):
+        if os.path.exists(dst):
+            raise FileExistsError(183, "Cannot create a file when that file already exists")
+        return real_rename(src, dst)
+
+    real_rename = os.rename
+    monkeypatch.setattr(os, "rename", windows_rename)
+    target = tmp_path / "KTLA.json"
+    target.write_text(json.dumps({"station_conf": {"network_name": "KTLA"}}))
+    ok, message = StationIO.__new__(StationIO).__class__.write_station_config(
+        type("IO", (), {"_l": __import__("logging").getLogger("t")})(), str(target), {"station_conf": {"network_name": "KTLA", "hidden": True}})
+    assert ok, message
+    assert json.loads(target.read_text())["station_conf"]["hidden"] is True
+    assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".fs42-*"))
+
+
+def test_atomic_write_retries_while_a_reader_holds_the_file(tmp_path, monkeypatch):
+    import os
+
+    from fs42 import platform_compat
+
+    monkeypatch.setattr(platform_compat, "IS_WINDOWS", True)
+    calls = {"n": 0}
+    real_replace = os.replace
+
+    def busy_then_free(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", busy_then_free)
+    target = tmp_path / "x.json"
+    target.write_text("old")
+    platform_compat.atomic_write_text(target, "new")
+    assert target.read_text() == "new" and calls["n"] == 3

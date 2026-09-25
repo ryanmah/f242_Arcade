@@ -308,8 +308,10 @@ def test_home_page_has_the_new_entries(home, qt_app):
     window = _build_window()()
     titles = [row.title for row in window.stack[-1].rows]
     assert "Open web portal" in titles
-    assert "Add input" in titles
-    assert "Close FieldStation42" in titles
+    assert "Remote Controls" in titles
+    assert "Shutdown FS42" in titles
+    assert "Exit menu" in titles
+    assert any(t.startswith("View: ") for t in titles)
     window.close()
 
 
@@ -441,3 +443,89 @@ def test_menu_fonts_dir_holds_only_fonts():
 
     names = sorted(p.name for p in paths.menu_fonts_dir().iterdir())
     assert names == ["VCR_OSD_MONO.ttf"]      # libass loads every file in here
+
+
+# ------------------------------------------------------------ osd position
+
+def test_channel_banner_sits_in_the_4x3_picture():
+    from fs42.osd.backends import mpv_osd
+    from fs42.osd.config import HAlignment, StatusDisplayConfig
+
+    config = StatusDisplayConfig()                       # LEFT, anchor 4:3, 30 px
+    # 16:9 window: the 4:3 picture starts 240 canvas units in; +30 px.
+    assert mpv_osd._status_x(config, 16 / 9) == pytest.approx(270.0)
+    # A 4:3 screen: the picture is the whole screen; 30 px at 1080p is
+    # 40 canvas units because the canvas is stretched over a narrower window.
+    assert mpv_osd._status_x(config, 4 / 3) == pytest.approx(40.0)
+    # Right-aligned mirrors it.
+    right = StatusDisplayConfig(halign=HAlignment.RIGHT)
+    assert mpv_osd._status_x(right, 16 / 9) == pytest.approx(1920 - 270.0)
+    # The old screen-relative placement is still available.
+    screen = StatusDisplayConfig(anchor="screen")
+    assert mpv_osd._status_x(screen, 16 / 9) == pytest.approx(0.12 / 2 * 1920)
+
+
+def test_view_toggle_saves_and_tells_the_player(home, qt_app):
+    from fs42.menu import pages
+    from fs42.menu.app import _build_window
+
+    window = _build_window()()
+    page = window.stack[-1]
+    assert "View: Fullscreen" in [r.title for r in page.rows]
+    page._toggle_view()
+    config = json.loads((home / "confs" / "main_config.json").read_text())
+    assert config["fullscreen"] is False
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t") == {"command": "view", "fullscreen": False}
+    assert "View: Windowed" in [r.title for r in page.rows]
+    window.close()
+
+
+def test_stations_page_opens_at_once_then_fills_in(home, qt_app):
+    import time as _time
+
+    from PySide6.QtWidgets import QApplication
+
+    from fs42.menu import pages, station_forms
+    from fs42.menu.app import _build_window
+
+    folder = home / "catalog" / "loop"
+    folder.mkdir(parents=True)
+    (folder / "a.mp4").write_bytes(b"0" * 16)
+    station_forms.create_station(station_forms.build_station_config(folder, "Loop", 5, "loop", []))
+
+    window = _build_window()()
+    page = pages.StationsPage(window)
+    window.push(page)
+    assert [r.title for r in page.rows] == ["Loading..."]
+    deadline = _time.time() + 5
+    while page._summaries is None and _time.time() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.05)
+    titles = [r.title for r in page.rows]
+    assert any("Loop" in t for t in titles) and titles[-1].endswith("Add a station")
+    window.close()
+
+
+def test_startup_fade_covers_then_lifts():
+    from fs42.osd.backends import mpv_osd
+
+    class FakeMpv:
+        def __init__(self):
+            self.payloads = []
+
+        def command(self, *args):
+            if args[0] == "osd-overlay":
+                self.payloads.append(args[3])
+
+    mpv = FakeMpv()
+    backend = mpv_osd.MpvOSD.__new__(mpv_osd.MpvOSD)
+    backend.mpv = mpv
+    backend.status_elements, backend.volume_elements, backend.logo_elements = [], [], []
+    backend._last_payload = None
+    backend.cover()
+    assert "1a&H00&" in mpv.payloads[-1]                  # opaque black
+    backend.fade_in(0.2)
+    import time as _time
+    _time.sleep(0.25)
+    backend._draw_ass()
+    assert mpv.payloads[-1] == ""                        # cover gone

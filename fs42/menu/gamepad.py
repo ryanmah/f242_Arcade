@@ -439,10 +439,9 @@ def save_controllers(controllers: list):
     config["controllers"] = [_clean_controller(e) for e in controllers]
     config.pop("gamepad_map", None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w") as f:
-        json.dump(config, f, indent=4)
-    os.replace(tmp, path)
+    from fs42.platform_compat import atomic_write_text
+
+    atomic_write_text(path, json.dumps(config, indent=4))
     _l.info("Saved %d controller(s) to %s", len(config["controllers"]), path)
 
 

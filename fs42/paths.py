@@ -111,11 +111,9 @@ def read_launcher_settings() -> dict:
 def write_launcher_settings(settings: dict):
     target = launcher_settings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".json.tmp")
-    with open(tmp, "w") as handle:
-        json.dump(settings, handle, indent=2)
-        handle.write("\n")
-    os.replace(tmp, target)
+    from fs42.platform_compat import atomic_write_text
+
+    atomic_write_text(target, json.dumps(settings, indent=2) + "\n")
 
 
 def configured_data_root():

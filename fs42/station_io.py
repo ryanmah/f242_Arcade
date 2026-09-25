@@ -200,26 +200,19 @@ class StationIO:
                 self._l.error(f"Failed to create backup: {e}")
                 return False, f"Failed to create backup: {str(e)}"
 
-        # Write to temporary file first (atomic write)
-        temp_path = f"{file_path}.tmp"
+        # Write to a temporary file and swap it in.  Upstream used os.rename,
+        # which on Windows refuses to overwrite an existing file
+        # ([WinError 183]) - so every edit of an existing channel failed
+        # there.  atomic_write_text uses os.replace and retries while
+        # another process briefly has the file open.
+        from fs42.platform_compat import atomic_write_text
+
         try:
-            with open(temp_path, 'w') as f:
-                json.dump(config_data, f, indent=2)
-
-            # Rename temp file to actual file (atomic on POSIX systems)
-            os.rename(temp_path, file_path)
+            atomic_write_text(file_path, json.dumps(config_data, indent=2))
             self._l.info(f"Successfully wrote configuration to {file_path}")
-
             return True, "Configuration file written successfully"
-
         except Exception as e:
             self._l.error(f"Failed to write configuration: {e}")
-            # Clean up temp file if it exists
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError as cleanup_error:
-                    self._l.warning(f"Failed to clean up temp file {temp_path}: {cleanup_error}")
             return False, f"Failed to write configuration: {str(e)}"
 
     def delete_station_file(self, file_path):
