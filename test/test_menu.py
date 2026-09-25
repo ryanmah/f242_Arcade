@@ -603,3 +603,37 @@ def test_caption_options_turn_every_track_off():
     off = station_player._caption_options(False)
     assert off == {"sid": "no", "sub_auto": "no", "sub_visibility": False}
     assert station_player._caption_options(True)["sid"] == "auto"
+
+
+def test_steam_virtual_pad_ignores_a_catch_all_map():
+    from fs42.menu import gamepad
+
+    controllers = [{"name": "Old", "device": "*", "map": {"button_3": "select"}}]
+    assert gamepad.controller_for("Microsoft X-Box 360 pad 0", controllers) is None
+    assert gamepad.controller_for("Steam Virtual Gamepad", controllers) is None
+    assert gamepad.controller_for("DragonRise Inc. Generic USB Joystick", controllers)["name"] == "Old"
+    mine = controllers + [{"name": "Deck", "device": "Microsoft X-Box 360 pad 0", "map": {"button_2": "menu"}}]
+    assert gamepad.controller_for("Microsoft X-Box 360 pad 0", mine)["name"] == "Deck"
+
+
+def test_menu_renders_frames_for_mpv(home, qt_app):
+    from fs42.menu.app import _build_window
+
+    ipc.set_state(ipc.KEY_MENU_SURFACE, {"width": 320, "height": 200})
+    try:
+        window = _build_window()()
+        assert window.mpv_surface is not None
+        window.mpv_surface.publish()
+        frame = ipc.get_state(ipc.KEY_MENU_FRAME)
+        assert frame["width"] == 320 and frame["height"] == 200 and frame["stride"] == 320 * 4
+        data = open(frame["path"], "rb").read()
+        assert len(data) == 320 * 200 * 4
+        assert data[3] > 0            # the dimmed backdrop is there, with alpha
+        serial = frame["serial"]
+        window.mpv_surface.publish()   # nothing changed: no new frame
+        assert ipc.get_state(ipc.KEY_MENU_FRAME)["serial"] == serial
+        window.mpv_surface.close()
+        assert ipc.get_state(ipc.KEY_MENU_FRAME) is None
+        window.close()
+    finally:
+        ipc.set_state(ipc.KEY_MENU_SURFACE, None)

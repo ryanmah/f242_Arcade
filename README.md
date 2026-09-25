@@ -78,7 +78,12 @@ Steam Play compatibility tool* **off** - it is a native Linux app, and inside
 the Steam Linux Runtime container a Flatpak mpv cannot start. The packaged
 app brings its own mpv and cleans up the environment Steam launches it with;
 a source checkout should run `python packaging/fetch_binaries.py` once so it
-has a self-contained mpv as well. If it still sits on the launch spinner,
+has a self-contained mpv as well. Game Mode's compositor (gamescope) shows one
+window per game, so there the menu is drawn inside the video window
+(`"menu_render": "window"` in `main_config.json` turns that off), mpv uses
+OpenGL (its Vulkan output crashes under gamescope), and Steam's virtual
+controller uses the standard button layout unless you map it on *Remote
+Controls* while in Game Mode. If it still sits on the launch spinner,
 open `http://<deck-ip>:4242` from another device: *Settings → Logs* shows
 `supervisor.log` and `player.out`.
 

@@ -48,6 +48,7 @@ from fs42.slot_reader import SlotReader
 logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", level=logging.INFO)
 
 
+MENU_OVERLAY_ID = 42
 STARTUP_FADE_SECONDS = 3.0
 
 
@@ -224,6 +225,16 @@ class StationPlayer:
                 "script_opts": "osc-idlescreen=no",
                 "hr_seek": "yes",
             }
+            from fs42 import gamescope
+
+            if start_it and gamescope.active():
+                # Under gamescope mpv's Vulkan output trips gamescope's own
+                # WSI layer ("vkroots.h: Assertion `obj' failed") and mpv
+                # aborts as soon as its window opens.  The same renderer
+                # over OpenGL is fine.
+                mpv_kwargs["vo"] = "gpu"
+                mpv_kwargs["gpu_api"] = StationManager().server_conf.get("gamescope_gpu_api") or "opengl"
+                self._l.info("gamescope: mpv uses vo=gpu, gpu-api=%s", mpv_kwargs["gpu_api"])
             if mpv_binary is not None:
                 mpv_kwargs["mpv_location"] = str(mpv_binary)
             if start_it and self._mpv_supports(mpv_binary, "osd-fonts-dir"):
@@ -269,6 +280,7 @@ class StationPlayer:
         self.osd = None
         self.menu_process = None
         self._menu_fullscreen_dropped = False
+        self._menu_frame_serial = None
         self._fullscreen = bool(StationManager().server_conf.get("fullscreen", True))
         # Fade the very first picture in from black instead of flashing the
         # standby card at start-up.
@@ -547,6 +559,14 @@ class StationPlayer:
         self._l.info("Opening the channel menu")
         ipc.set_state(ipc.KEY_MENU_OPEN, True)
         ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
+        ipc.set_state(ipc.KEY_MENU_FRAME, None)
+        self._menu_frame_serial = None
+        if self._menu_in_mpv():
+            width, height = self._osd_size()
+            self._l.info("Drawing the menu inside mpv (%dx%d)", width, height)
+            ipc.set_state(ipc.KEY_MENU_SURFACE, {"width": width, "height": height})
+        else:
+            ipc.set_state(ipc.KEY_MENU_SURFACE, None)
         if StationManager().server_conf.get("menu_drop_fullscreen"):
             try:
                 self.mpv.fs = False
@@ -566,6 +586,14 @@ class StationPlayer:
         self.menu_process = None
         ipc.set_state(ipc.KEY_MENU_OPEN, False)
         ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
+        if getattr(self, "_menu_frame_serial", None) is not None:
+            try:
+                self.mpv.command("overlay-remove", MENU_OVERLAY_ID)
+            except Exception:
+                pass
+        self._menu_frame_serial = None
+        ipc.set_state(ipc.KEY_MENU_SURFACE, None)
+        ipc.set_state(ipc.KEY_MENU_FRAME, None)
         self._focus_video_window()
         if self._menu_fullscreen_dropped:
             try:
@@ -578,6 +606,49 @@ class StationPlayer:
         """Notice the menu closing.  Cheap enough for the 50ms wait loops."""
         if self.menu_process is not None and not self.menu_process.is_alive():
             self.close_menu()
+            return
+        if self.menu_process is not None:
+            self._show_menu_frame()
+
+    def _menu_in_mpv(self) -> bool:
+        """Draw the menu inside the video window instead of as its own window.
+
+        "menu_render" in main_config.json: "mpv", "window", or "auto" (the
+        default: inside mpv under gamescope, where a second window would
+        never be shown over the video).
+        """
+        mode = str(StationManager().server_conf.get("menu_render") or "auto").lower()
+        if mode == "mpv":
+            return True
+        if mode == "window":
+            return False
+        from fs42 import gamescope
+
+        return gamescope.active()
+
+    def _osd_size(self):
+        try:
+            width, height = int(self.mpv.osd_width or 0), int(self.mpv.osd_height or 0)
+            if width > 0 and height > 0:
+                return width, height
+        except Exception:
+            pass
+        return 1280, 800
+
+    def _show_menu_frame(self):
+        """Hand the menu's latest off-screen frame to mpv."""
+        try:
+            frame = ipc.get_state(ipc.KEY_MENU_FRAME)
+        except Exception:
+            return
+        if not frame or frame.get("serial") == self._menu_frame_serial:
+            return
+        try:
+            self.mpv.command("overlay-add", MENU_OVERLAY_ID, 0, 0, frame["path"], 0, "bgra",
+                             int(frame["width"]), int(frame["height"]), int(frame["stride"]))
+            self._menu_frame_serial = frame.get("serial")
+        except Exception as e:
+            self._l.debug("Could not show the menu frame: %s", e)
 
     def reload_stations(self):
         """Re-read station configs written by the menu or the web console.

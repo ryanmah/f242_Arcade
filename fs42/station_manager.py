@@ -175,6 +175,8 @@ class StationManager(object):
                     "prewarm_media",
                     "volume_step",
                     "update_repo",
+                    "menu_render",
+                    "gamescope_gpu_api",
                 ]
 
                 for key in to_check:

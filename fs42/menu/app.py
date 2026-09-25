@@ -36,7 +36,14 @@ def _build_window():
             self.setWindowTitle("FieldStation42 Menu")
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
             self.setAttribute(Qt.WA_TranslucentBackground)
-            screen = QApplication.primaryScreen().geometry()
+            surface = _surface()
+            if surface:
+                # Drawn into mpv: our "screen" is mpv's OSD canvas.
+                from PySide6.QtCore import QRect
+
+                screen = QRect(0, 0, surface["width"], surface["height"])
+            else:
+                screen = QApplication.primaryScreen().geometry()
             self.setGeometry(screen)
             self.scale = theme.scale_for(screen.height())
             theme.load_fonts()
@@ -72,10 +79,18 @@ def _build_window():
             self.player_timer.timeout.connect(self._check_player)
             self.player_timer.start(PLAYER_POLL_MS)
 
-            # Game Mode: draw over the video instead of replacing it.
-            from fs42 import gamescope
+            self.mpv_surface = None
+            if surface:
+                # mpv's own CRT shader covers the picture; the menu's animated
+                # noise would only force a new frame every tick.
+                self.effects.hide()
+                self.mpv_surface = _MpvSurface(self, surface["width"], surface["height"])
+            else:
+                # Game Mode with menu_render "window": ask gamescope to draw
+                # this window over the video.
+                from fs42 import gamescope
 
-            gamescope.mark_overlay(self)
+                gamescope.mark_overlay(self)
 
         # ------------------------------------------------------ navigation
 
@@ -161,8 +176,97 @@ def _build_window():
     return MenuWindow
 
 
+def _surface():
+    """{"width", "height"} when the player wants the menu drawn inside mpv."""
+    try:
+        surface = ipc.get_state(ipc.KEY_MENU_SURFACE)
+        if surface and int(surface.get("width", 0)) > 0 and int(surface.get("height", 0)) > 0:
+            return {"width": int(surface["width"]), "height": int(surface["height"])}
+    except Exception:
+        pass
+    return None
+
+
+class _MpvSurface:
+    """Render the menu off screen and publish frames for mpv's overlay-add.
+
+    gamescope (Steam Deck Game Mode) shows a single window per game, so a
+    menu window of our own is never seen over the video.  Instead the menu
+    is painted into a premultiplied BGRA image - exactly the layout mpv's
+    ``overlay-add ... bgra`` reads - written to one of two files in turn, and
+    the player tells mpv to show it.  Only changed frames are published.
+    """
+
+    INTERVAL_MS = 60
+
+    def __init__(self, window, width, height):
+        import os
+
+        from PySide6.QtCore import QTimer
+
+        self.window = window
+        self.width = width
+        self.height = height
+        folder = paths.cache()
+        folder.mkdir(parents=True, exist_ok=True)
+        self.files = [folder / f"menu-frame-{os.getpid()}-{i}.bgra" for i in (0, 1)]
+        self.turn = 0
+        self.serial = 0
+        self.last = None
+        self.timer = QTimer(window)
+        self.timer.timeout.connect(self.publish)
+        self.timer.start(self.INTERVAL_MS)
+
+    def render(self) -> bytes:
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QImage, QRegion
+        from PySide6.QtWidgets import QWidget
+
+        image = QImage(self.width, self.height, QImage.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        self.window.render(image, QPoint(0, 0), QRegion(), QWidget.RenderFlag.DrawChildren)
+        self.stride = image.bytesPerLine()
+        return bytes(image.constBits())
+
+    def publish(self):
+        try:
+            data = self.render()
+            digest = hash(data)
+            if digest == self.last:
+                return
+            path = self.files[self.turn]
+            with open(path, "wb") as f:
+                f.write(data)
+            self.turn ^= 1
+            self.serial += 1
+            self.last = digest
+            ipc.set_state(ipc.KEY_MENU_FRAME, {
+                "path": str(path), "width": self.width, "height": self.height,
+                "stride": self.stride, "serial": self.serial,
+            })
+        except Exception as e:
+            _l.warning("Could not publish a menu frame: %s", e)
+
+    def close(self):
+        self.timer.stop()
+        try:
+            ipc.set_state(ipc.KEY_MENU_FRAME, None)
+        except Exception:
+            pass
+        for path in self.files:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 def run_menu_app() -> int:
     """Body of the menu process."""
+    import os
+
+    if _surface():
+        # Nothing of ours appears on screen; mpv shows what we render.
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -182,6 +286,8 @@ def run_menu_app() -> int:
     try:
         return app.exec()
     finally:
+        if window.mpv_surface is not None:
+            window.mpv_surface.close()
         ipc.set_state(ipc.KEY_MENU_OPEN, False)
         ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
 

@@ -445,11 +445,31 @@ def save_controllers(controllers: list):
     _l.info("Saved %d controller(s) to %s", len(config["controllers"]), path)
 
 
+def standard_layout(device: str) -> bool:
+    """Pads that always report the standard (xpad) button numbering.
+
+    Steam Input's virtual controller is one: in Steam Deck Game Mode, and
+    whenever Steam Input is on for the shortcut, the app sees
+    "Microsoft X-Box 360 pad N" (or "Steam Virtual Gamepad") instead of the
+    physical controller, laid out like an Xbox pad whatever the hardware.
+    """
+    name = (device or "").lower()
+    return name.startswith("microsoft x-box 360 pad") or "steam virtual gamepad" in name
+
+
 def controller_for(device: str, controllers: list):
-    """The entry for a device: an exact match first, then a catch-all."""
+    """The entry for a device: an exact match first, then a catch-all.
+
+    A catch-all map was learned on some real controller's numbering; laid
+    over a standard-layout pad (Steam's virtual one in Game Mode) it would
+    scramble buttons that the default map already gets right, so those only
+    use an entry made for them.
+    """
     for entry in controllers:
         if entry.get("device") == device:
             return entry
+    if standard_layout(device):
+        return None
     for entry in controllers:
         if entry.get("device") == ANY_DEVICE:
             return entry

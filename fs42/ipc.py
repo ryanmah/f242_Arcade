@@ -60,6 +60,13 @@ KEY_INPUT_CAPTURE = "input_capture"
 # What the menu is showing right now: {"title", "subtitle", "cursor", "rows": [...]}.
 # Lets the phone remote mirror the on-screen menu, and lets tests see it.
 KEY_MENU_PAGE = "menu_page"
+# Drawing the menu inside mpv (Steam Deck Game Mode, where gamescope shows
+# one window per game): the player sets KEY_MENU_SURFACE = {"width", "height"}
+# before starting the menu; the menu renders off screen and publishes each
+# new frame as KEY_MENU_FRAME = {"path", "width", "height", "stride", "serial"},
+# which the player hands to mpv's overlay-add.
+KEY_MENU_SURFACE = "menu_surface"
+KEY_MENU_FRAME = "menu_frame"
 
 _local = threading.local()
 _db_path_override = None

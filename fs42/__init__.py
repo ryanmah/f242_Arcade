@@ -3,4 +3,4 @@
 This is the desktop fork: everything ships as one cross-platform executable.
 """
 
-__version__ = "1.0.23"
+__version__ = "1.0.24"
