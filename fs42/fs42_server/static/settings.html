@@ -230,6 +230,32 @@
             }
         }
 
+        // --------------------------------------------------------------- logs
+        async function loadLogList() {
+            const select = document.getElementById('log-name');
+            try {
+                const body = await (await fetch('/settings/logs', {cache: 'no-store'})).json();
+                document.getElementById('log-folder').textContent = body.folder;
+                const previous = select.value;
+                select.innerHTML = body.files.map(f =>
+                    `<option value="${esc(f.name)}">${esc(f.name)} (${Math.round(f.size / 1024)} KB)</option>`).join('');
+                if (previous && body.files.some(f => f.name === previous)) select.value = previous;
+                if (body.files.length) showLog();
+                else document.getElementById('log-text').textContent = 'No logs yet.';
+            } catch (e) {
+                document.getElementById('log-text').textContent = 'Could not list the logs: ' + e;
+            }
+        }
+
+        async function showLog() {
+            const name = document.getElementById('log-name').value;
+            if (!name) return;
+            const pre = document.getElementById('log-text');
+            const body = await (await fetch('/settings/logs/' + encodeURIComponent(name) + '?lines=400', {cache: 'no-store'})).json();
+            pre.textContent = body.text || '(empty)';
+            pre.scrollTop = pre.scrollHeight;
+        }
+
         document.addEventListener('DOMContentLoaded', async function () {
             window.fs42Common.initTheme();
             const content = `
@@ -279,6 +305,19 @@
                 </div>
 
                 <div class="fs42-card">
+                    <h2 style="margin-top:0">Logs</h2>
+                    <p class="fs42-muted">What FieldStation42 has been doing, from <span id="log-folder" class="fs42-path"></span>.
+                    Handy when the TV window won't open: this page still works from a phone or another computer.</p>
+                    <form class="pure-form" onsubmit="return false;">
+                        <div class="fs42-row">
+                            <select id="log-name" onchange="showLog()"></select>
+                            <button class="pure-button" onclick="loadLogList()">Refresh</button>
+                        </div>
+                    </form>
+                    <pre id="log-text" class="fs42-terminal" style="white-space:pre-wrap; max-height:28em; overflow:auto;"></pre>
+                </div>
+
+                <div class="fs42-card">
                     <h2 style="margin-top:0">Restart</h2>
                     <p class="fs42-muted">Stops and starts the player, the web console and the on-screen display. Needed after changing the data folder.</p>
                     <button id="btn-restart" class="pure-button pure-button-primary" onclick="restart()">Restart FieldStation42</button>
@@ -288,6 +327,7 @@
             document.body.innerHTML = await window.fs42Common.createPageLayout('Settings', content);
             await load();
             checkUpdate();
+            loadLogList();
         });
     </script>
 </body>

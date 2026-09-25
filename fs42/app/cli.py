@@ -81,6 +81,24 @@ def _configure_logging(args):
         )
     root.setLevel(level)
 
+    # The long-running parts always keep a log in the data folder: launched
+    # from Steam's Game Mode there is no terminal to read, and the web
+    # console's Settings page shows these files.
+    role = getattr(args, "role", None) or _SUBCOMMANDS.get(getattr(args, "command", None) or "") or ROLE_SUPERVISOR
+    if role in (ROLE_SUPERVISOR, ROLE_PLAYER, ROLE_API):
+        try:
+            from logging.handlers import RotatingFileHandler
+
+            from fs42 import paths
+
+            paths.logs().mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(str(paths.logs(f"{role}.log")), maxBytes=1_000_000, backupCount=2,
+                                          encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s"))
+            root.addHandler(handler)
+        except Exception as e:
+            logging.getLogger("APP").debug("No log file: %s", e)
+
     logfile = getattr(args, "logfile", None)
     if logfile:
         from fs42 import paths
@@ -188,6 +206,12 @@ def _split_argv(argv):
 
 
 def dispatch(argv) -> int:
+    from fs42.app import launch_env
+
+    # Before anything loads a graphics library: Steam's launch environment
+    # (runtime library paths, overlay preload) is scrubbed here, re-executing
+    # the packaged app once if it has to.
+    launch_env.prepare()
     argv = list(argv)
     role, command, ours, theirs = _split_argv(argv)
 

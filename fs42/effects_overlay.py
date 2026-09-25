@@ -35,6 +35,10 @@ def compositing_available() -> bool:
         return True
     if os.environ.get("WAYLAND_DISPLAY"):
         return True
+    from fs42 import gamescope
+
+    if gamescope.active():
+        return True
     display_name = os.environ.get("DISPLAY")
     if not display_name:
         return False
@@ -85,6 +89,9 @@ def run_overlay(queue):
     window.setAttribute(Qt.WA_TranslucentBackground)
     window.setAttribute(Qt.WA_ShowWithoutActivating)
     window.setGeometry(QApplication.primaryScreen().geometry())
+    from fs42 import gamescope
+
+    gamescope.mark_overlay(window)
 
     def keep_on_top():
         if window.isVisible():

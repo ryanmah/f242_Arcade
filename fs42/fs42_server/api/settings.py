@@ -117,3 +117,35 @@ async def update_status():
     from fs42 import updater
 
     return {"version": paths.app_version(), **updater.job().status()}
+
+
+# --------------------------------------------------------------------- logs
+
+_LOG_NAME = __import__("re").compile(r"[\w.-]+\.(log|out)(\.\d)?$")
+
+
+@router.get("/logs")
+async def list_logs():
+    folder = paths.logs()
+    files = []
+    if folder.is_dir():
+        for entry in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if entry.is_file() and _LOG_NAME.fullmatch(entry.name):
+                files.append({"name": entry.name, "size": entry.stat().st_size, "modified": entry.stat().st_mtime})
+    return {"folder": str(folder), "files": files}
+
+
+@router.get("/logs/{name}")
+async def read_log(name: str, lines: int = 300):
+    if not _LOG_NAME.fullmatch(name):
+        raise HTTPException(status_code=400, detail="Not a log file")
+    path = paths.logs(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No such log")
+    lines = max(10, min(lines, 5000))
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - 400_000))
+        text = f.read().decode("utf-8", "replace")
+    return {"name": name, "text": "\n".join(text.splitlines()[-lines:])}

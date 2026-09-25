@@ -28,6 +28,26 @@ BACKOFF_CAP = 30.0
 HEALTHY_AFTER = 60.0
 
 
+def _child_output(role):
+    """Where a child's raw output goes when nobody is watching a terminal.
+
+    Launched from Steam or a desktop menu, stdout/stderr lead nowhere, and
+    that is where Qt ("could not load the Qt platform plugin"), mpv and
+    Python tracebacks say what went wrong.  Keep the last run's in
+    logs/<role>.out.  From a terminal, output stays on the terminal.
+    """
+    try:
+        if sys.stderr is not None and sys.stderr.isatty():
+            return None
+    except Exception:
+        pass
+    try:
+        paths.logs().mkdir(parents=True, exist_ok=True)
+        return open(paths.logs(f"{role}.out"), "ab", buffering=0)
+    except OSError:
+        return None
+
+
 class Child:
     def __init__(self, role, argv, restart="always", max_failures=None):
         self.role = role
@@ -64,7 +84,15 @@ class Child:
             # a player that was killed rather than exiting left mpv behind,
             # fullscreen and on top of everything (seen on SteamOS).
             kwargs["start_new_session"] = True
-        self.process = subprocess.Popen(self.argv, **kwargs)
+        output = _child_output(self.role)
+        if output is not None:
+            kwargs["stdout"] = output
+            kwargs["stderr"] = subprocess.STDOUT
+        try:
+            self.process = subprocess.Popen(self.argv, **kwargs)
+        finally:
+            if output is not None:
+                output.close()
         self.pgid = self.process.pid if not platform_compat.IS_WINDOWS else None
         self.started_at = time.monotonic()
 
@@ -209,6 +237,13 @@ class Supervisor:
     # ------------------------------------------------------------- run loop
 
     def run(self) -> int:
+        from fs42.app import launch_env
+
+        _l.info("FieldStation42 %s starting", paths.app_version())
+        _l.info("Launch environment: %s", launch_env.summary())
+        for change in launch_env.changes():
+            _l.info("Launch environment: %s", change)
+        self._trim_outputs()
         self.lock = platform_compat.InstanceLock(paths.runtime("fs42.lock"))
         if not self.lock.acquire():
             _l.error("FieldStation42 is already running.")
@@ -275,6 +310,20 @@ class Supervisor:
             self._shutdown_children()
             self.lock.release()
         return 0
+
+    @staticmethod
+    def _trim_outputs():
+        """Start each run's raw output logs afresh (they are only for the last run)."""
+        for role in ("player", "api"):
+            try:
+                path = paths.logs(f"{role}.out")
+                if path.exists() and path.stat().st_size > 2_000_000:
+                    path.unlink()
+                elif path.exists():
+                    with open(path, "ab") as f:
+                        f.write(b"\n===== new run =====\n")
+            except OSError:
+                pass
 
     def _restart_everything(self, reason):
         """Stop every component and start them again, re-reading the data

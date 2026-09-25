@@ -64,6 +64,9 @@ def _run_overlay_app(lines, play_duration, show_seconds, overlay_cfg):
             self.setAutoFillBackground(False)
             self.setStyleSheet("background: transparent;")
             self.setCursor(Qt.BlankCursor)
+            from fs42 import gamescope
+
+            gamescope.mark_overlay(self)
 
             screen = QApplication.primaryScreen()
             if screen:

@@ -68,6 +68,9 @@ class NowPlayingWindow(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        from fs42 import gamescope
+
+        gamescope.mark_overlay(self)
         self.setCursor(Qt.BlankCursor)  # Hide the mouse cursor
 
         # Make it fullscreen and get screen dimensions

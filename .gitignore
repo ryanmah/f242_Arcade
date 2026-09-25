@@ -203,3 +203,4 @@ build-win/
 /dist-linux/
 /build-linux/
 /.fs42_version
+/logs/

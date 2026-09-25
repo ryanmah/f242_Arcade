@@ -72,6 +72,11 @@ def _build_window():
             self.player_timer.timeout.connect(self._check_player)
             self.player_timer.start(PLAYER_POLL_MS)
 
+            # Game Mode: draw over the video instead of replacing it.
+            from fs42 import gamescope
+
+            gamescope.mark_overlay(self)
+
         # ------------------------------------------------------ navigation
 
         def push(self, page):
