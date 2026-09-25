@@ -86,6 +86,8 @@ def _handle_player_command(q_message):
             return PlayerOutcome(PlayerState.SUCCESS, "menu:open")
         case "reload_input":
             return PlayerOutcome(PlayerState.SUCCESS, "input:reload")
+        case "captions":
+            return PlayerOutcome(PlayerState.SUCCESS, "captions:" + ("on" if q_message.get("on") else "off"))
         case "view":
             fullscreen = bool(q_message.get("fullscreen", True))
             return PlayerOutcome(PlayerState.SUCCESS, "view:" + ("fullscreen" if fullscreen else "windowed"))

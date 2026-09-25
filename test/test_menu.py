@@ -529,3 +529,25 @@ def test_startup_fade_covers_then_lifts():
     _time.sleep(0.25)
     backend._draw_ass()
     assert mpv.payloads[-1] == ""                        # cover gone
+
+
+def test_captions_toggle_saves_and_tells_the_player(home, qt_app):
+    from fs42.menu.app import _build_window
+
+    window = _build_window()()
+    page = window.stack[-1]
+    assert "Captions: Off" in [r.title for r in page.rows]
+    page._toggle_captions()
+    config = json.loads((home / "confs" / "main_config.json").read_text())
+    assert config["captions"] is True
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t") == {"command": "captions", "on": True}
+    assert "Captions: On" in [r.title for r in page.rows]
+    window.close()
+
+
+def test_caption_options_turn_every_track_off():
+    from fs42 import station_player
+
+    off = station_player._caption_options(False)
+    assert off == {"sid": "no", "sub_auto": "no", "sub_visibility": False}
+    assert station_player._caption_options(True)["sid"] == "auto"

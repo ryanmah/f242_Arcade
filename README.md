@@ -131,6 +131,7 @@ gamepad) to manage channels without leaving the TV:
   Deck, Bazzite and most desktops have). The player does it with a tiny GPU shader in mpv, so it costs
   nothing to play back.
 - **View** — switch between fullscreen and a window (remembered)
+- **Captions** — subtitles and closed captions, off unless you turn them on
 - **Exit menu** — back to TV
 - **Shutdown FS42** — stops the player, the web console and the menu
 
@@ -238,6 +239,7 @@ application settings; this fork adds a few:
 | `video_effects` | all off | `{"scanline_opacity": 0-1, "scanline_size": 2-16, "scanline_thickness": 1-8, "scanline_style": "soft"/"medium"/"hard", "scanline_pattern": "horizontal"/"vertical"/"grid", "noise_opacity": 0-1, "noise_grain": 1-4}`, set from the menu's *Video effects* page |
 | station `video_zoom` | `1.0` | Per-channel zoom (0.5-2.0), set from the station's *Picture* page along with upstream's `panscan` / `video_keepaspect` |
 | osd.json status `anchor` / `x_offset_px` | `"4:3"` / `30` | The channel banner is placed `x_offset_px` (1080p pixels) in from the edge of a centred 4:3 picture, so it sits in the same spot over 4:3 and 16:9 video; `"screen"` restores upstream's `x_margin` placement |
+| `captions` | `false` | Show subtitle / closed-caption tracks (embedded or side-car `.srt`); the menu's *Captions* row toggles it |
 | `fullscreen` | `true` | Fullscreen or windowed video; the menu's *View* row toggles it |
 | `prewarm_media` | `true` | Read the head and tail of what each channel plays next so the first tune to it is as quick as the second |
 | `schedule_agent` | `{"amount_to_add": "week", "trigger_add_at": "day"}` | Keep every schedule at least a day ahead, building in the background; `null` to turn off (upstream's default) |

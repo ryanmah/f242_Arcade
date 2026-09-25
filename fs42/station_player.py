@@ -51,6 +51,12 @@ logging.basicConfig(format="%(asctime)s %(levelname)s:%(name)s:%(message)s", lev
 STARTUP_FADE_SECONDS = 3.0
 
 
+def _caption_options(on: bool) -> dict:
+    if on:
+        return {"sid": "auto", "sub_auto": "exact", "sub_visibility": True}
+    return {"sid": "no", "sub_auto": "no", "sub_visibility": False}
+
+
 def _guide_channel_runner():
     from fs42.guide_tk import guide_channel_runner
 
@@ -209,6 +215,10 @@ class StationPlayer:
                 "fs": bool(StationManager().server_conf.get("fullscreen", True)),
                 # A window, when there is one, never bigger than the screen.
                 "autofit_larger": "80%x80%",
+                # Captions: off unless turned on from the menu.  sid=no stops
+                # mpv picking an embedded or side-by-side subtitle track at
+                # all; sub-visibility hides one even if a remote selects it.
+                **_caption_options(bool(StationManager().server_conf.get("captions", False))),
                 "idle": True,
                 "force_window": True,
                 "script_opts": "osc-idlescreen=no",
@@ -647,6 +657,21 @@ class StationPlayer:
             and response.payload == "input:reload"
         ):
             self._restart_gamepad()
+            return True
+
+        if (
+            response
+            and response.status == PlayerState.SUCCESS
+            and isinstance(response.payload, str)
+            and response.payload.startswith("captions:")
+        ):
+            on = response.payload.split(":", 1)[1] == "on"
+            try:
+                for name, value in _caption_options(on).items():
+                    setattr(self.mpv, name, value)
+            except Exception as e:
+                self._l.warning("Could not change captions: %s", e)
+            self._l.info("Captions %s", "on" if on else "off")
             return True
 
         if (

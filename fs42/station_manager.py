@@ -53,6 +53,8 @@ class StationManager(object):
                     "menu_drop_fullscreen": False,
                     # The menu's "View" toggle: fullscreen or a window.
                     "fullscreen": True,
+                    # Subtitles / closed captions; the menu's "Captions" row.
+                    "captions": False,
                     # Poll a gamepad for menu navigation and channel changes.
                     "gamepad": False,
                     # Read the head and tail of what each channel plays next
@@ -165,6 +167,7 @@ class StationManager(object):
                     # in-app menu
                     "menu_drop_fullscreen",
                     "fullscreen",
+                    "captions",
                     "gamepad",
                     "gamepad_map",
                     "controllers",

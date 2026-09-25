@@ -372,6 +372,10 @@ def _fullscreen() -> bool:
     return bool(_read_main_config().get("fullscreen", True))
 
 
+def _captions() -> bool:
+    return bool(_read_main_config().get("captions", False))
+
+
 def _web_port():
     from fs42.station_manager import StationManager
 
@@ -393,6 +397,7 @@ class HomePage(ListPage):
             Row("Remote Controls", action=lambda: self.window.push(ControllersPage(self.window))),
             Row("Video effects", action=lambda: self.window.push(VideoEffectsPage(self.window))),
             Row(f"View: {'Fullscreen' if _fullscreen() else 'Windowed'}", action=self._toggle_view),
+            Row(f"Captions: {'On' if _captions() else 'Off'}", action=self._toggle_captions),
             Row("Exit menu", action=self.window.close_menu),
             Row("Shutdown FS42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
         ]
@@ -408,6 +413,17 @@ class HomePage(ListPage):
         send_player({"command": "view", "fullscreen": fullscreen})
         self.refresh()
         self.say("FULLSCREEN" if fullscreen else "WINDOWED", "good")
+
+    def _toggle_captions(self):
+        on = not _captions()
+        try:
+            _save_main_config_key("captions", on)
+        except Exception as e:
+            self.say(f"COULD NOT SAVE: {e}", "bad")
+            return
+        send_player({"command": "captions", "on": on})
+        self.refresh()
+        self.say("CAPTIONS ON" if on else "CAPTIONS OFF", "good")
 
     def _open_web_portal(self):
         """Open the web console in the default browser and get out of its way."""
