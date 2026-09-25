@@ -38,3 +38,15 @@ def test_packaged_app_cleans_the_callers_value(monkeypatch):
     env, _ = launch_env.cleaned({"LD_LIBRARY_PATH": "/opt/fs42/_internal:" + STEAM_LD, "LD_LIBRARY_PATH_ORIG": STEAM_LD})
     assert "LD_LIBRARY_PATH_ORIG" not in env
     assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu/libfakeroot"
+
+
+def test_gamescope_overrides_a_wayland_request():
+    env, changes = launch_env.cleaned({"XDG_CURRENT_DESKTOP": "gamescope", "QT_QPA_PLATFORM": "wayland"})
+    assert env["QT_QPA_PLATFORM"] == "xcb"
+
+
+def test_inside_the_steam_container_libraries_are_left_alone():
+    ld = "/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu:/x/SteamLinuxRuntime_4/lib"
+    env, changes = launch_env.cleaned({"LD_LIBRARY_PATH": ld, "PRESSURE_VESSEL_RUNTIME": "1"})
+    assert env["LD_LIBRARY_PATH"] == ld
+    assert any("container" in c for c in changes)

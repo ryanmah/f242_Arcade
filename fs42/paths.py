@@ -352,14 +352,47 @@ def bin_path(name: str):
     except Exception:
         pass
 
-    # 2. bundled
-    candidate = bin_dir() / exe
-    if candidate.exists():
-        return candidate
+    # 2. bundled - in a source checkout, what packaging/fetch_binaries.py
+    #    downloaded counts as bundled too.
+    candidates = [bin_dir() / exe]
+    if not IS_FROZEN:
+        candidates.append(_repo_root() / "packaging" / "vendor" / platform_tag() / exe)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
 
     # 3. system
     found = shutil.which(name)
+    if found and not _runnable_wrapper(Path(found)):
+        return None
     return Path(found) if found else None
+
+
+def _runnable_wrapper(path: Path) -> bool:
+    """False for a Flatpak launcher script where Flatpak cannot run.
+
+    SteamOS users often get mpv from Flathub plus a ``~/.local/bin/mpv``
+    script that runs ``flatpak run io.mpv.Mpv``.  Inside the Steam Linux
+    Runtime container (Game Mode with a compatibility tool) there is no
+    ``flatpak``, so the script can only fail.
+    """
+    try:
+        if path.stat().st_size > 16384:
+            return True                       # a real binary
+        head = path.read_bytes()[:4096]
+        if not head.startswith(b"#!") or b"flatpak" not in head:
+            return True
+    except OSError:
+        return True
+    if shutil.which("flatpak"):
+        return True
+    _l.warning("%s runs mpv through Flatpak, and Flatpak is not available here", path)
+    return False
+
+
+def in_steam_runtime_container() -> bool:
+    """Running inside Steam's pressure-vessel container (Steam Linux Runtime)."""
+    return os.path.isdir("/run/pressure-vessel") or any(k.startswith("PRESSURE_VESSEL") for k in os.environ)
 
 
 # --------------------------------------------------------------------------

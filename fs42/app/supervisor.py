@@ -213,6 +213,17 @@ class Supervisor:
                 "Could not find mpv. Install it, or set \"mpv_path\" in %s",
                 paths.confs("main_config.json"),
             )
+            if paths.in_steam_runtime_container():
+                _l.error(
+                    "Steam is running FieldStation42 inside the Steam Linux Runtime container, where a "
+                    "Flatpak mpv cannot start. In the Steam library entry's Properties > Compatibility, "
+                    "turn off \"Force the use of a specific Steam Play compatibility tool\"."
+                )
+            if not paths.IS_FROZEN:
+                _l.error(
+                    "Running from source: `python packaging/fetch_binaries.py` downloads a self-contained "
+                    "mpv into packaging/vendor/, which works everywhere (Game Mode included)."
+                )
         else:
             _l.info("Using mpv at %s", mpv)
 

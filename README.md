@@ -70,6 +70,18 @@ install on either platform. The single-file build unpacks itself on every
 launch, which costs a few seconds of startup; the installed and folder builds
 start instantly.
 
+### Steam Deck Game Mode
+
+Add FieldStation42 to Steam (the Linux installer offers this) and leave the
+library entry's *Properties → Compatibility → Force the use of a specific
+Steam Play compatibility tool* **off** - it is a native Linux app, and inside
+the Steam Linux Runtime container a Flatpak mpv cannot start. The packaged
+app brings its own mpv and cleans up the environment Steam launches it with;
+a source checkout should run `python packaging/fetch_binaries.py` once so it
+has a self-contained mpv as well. If it still sits on the launch spinner,
+open `http://<deck-ip>:4242` from another device: *Settings → Logs* shows
+`supervisor.log` and `player.out`.
+
 ### Updating
 
 *Menu → Check for updates*, or *Settings → Updates* in the web console. It

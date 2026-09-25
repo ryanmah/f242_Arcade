@@ -35,6 +35,13 @@ def under_gamescope(env=None) -> bool:
     return bool(env.get("GAMESCOPE_WAYLAND_DISPLAY")) or env.get("XDG_CURRENT_DESKTOP", "").lower() == "gamescope"
 
 
+def in_steam_container(env=None) -> bool:
+    env = os.environ if env is None else env
+    if env is os.environ and os.path.isdir("/run/pressure-vessel"):
+        return True
+    return any(k.startswith("PRESSURE_VESSEL") for k in env) or "pressure-vessel" in env.get("LD_LIBRARY_PATH", "")
+
+
 def launched_by_steam(env=None) -> bool:
     env = os.environ if env is None else env
     return any(env.get(k) for k in ("SteamAppId", "SteamGameId", "STEAM_COMPAT_APP_ID", "SteamClientLaunch"))
@@ -68,7 +75,12 @@ def cleaned(env) -> tuple:
     # what matters, and the bootloader adds the bundle again on re-exec.
     original_key = "LD_LIBRARY_PATH_ORIG" if frozen and "LD_LIBRARY_PATH_ORIG" in env else "LD_LIBRARY_PATH"
     original = env.get(original_key, "")
-    value, removed = clean_library_path(original)
+    # Inside Steam's own container the runtime's libraries are the system;
+    # leave them be.
+    in_container = in_steam_container(env)
+    value, removed = clean_library_path(original) if not in_container else (original, [])
+    if in_container:
+        changes.append("inside the Steam Linux Runtime container (compatibility tool on)")
     if removed:
         changes.append(f"dropped {len(removed)} Steam Runtime library folder(s) from LD_LIBRARY_PATH")
         if frozen:
@@ -85,7 +97,9 @@ def cleaned(env) -> tuple:
         else:
             env.pop("LD_PRELOAD", None)
     if under_gamescope(env):
-        if env.get("QT_QPA_PLATFORM") is None:
+        # gamescope hosts X11 clients only; a launcher script asking for
+        # Wayland (QT_QPA_PLATFORM=wayland) would leave Qt with no display.
+        if (env.get("QT_QPA_PLATFORM") or "").split(";")[0] not in ("xcb", "offscreen"):
             env["QT_QPA_PLATFORM"] = "xcb"
             changes.append("Qt pinned to X11 under gamescope")
         if env.pop("WAYLAND_DISPLAY", None) is not None:
