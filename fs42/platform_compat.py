@@ -277,27 +277,77 @@ def _windows_of_pid(pid: int):
 def focus_window_of_pid(pid: int) -> bool:
     """Bring the visible top-level window of ``pid`` to the foreground.
 
-    Returns True if a window was found and the foreground call succeeded.
+    Returns True once that window is the foreground window.
+
+    Windows only lets the foreground process (or one it allows) change the
+    foreground window.  This used to tap Alt first to get around that, but a
+    lone Alt press-and-release puts whichever window has focus into menu
+    mode - so after closing the menu the next arrow key opened the video
+    window's system menu instead of changing channel.  Now: a plain attempt,
+    then borrowing the foreground thread's input state (AttachThreadInput),
+    then a zero-distance mouse nudge, which counts as input from us without
+    pressing anything.
     """
     if not IS_WINDOWS or not pid:
         return False
     try:
         import ctypes
+        from ctypes import wintypes
 
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+
         windows = _windows_of_pid(pid)
         if not windows:
             return False
         hwnd = windows[0]
-        VK_MENU, KEYEVENTF_KEYUP = 0x12, 0x0002
-        # The Alt tap makes Windows treat us as the input-owning process for
-        # the next foreground change.
-        user32.keybd_event(VK_MENU, 0, 0, 0)
-        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-        ok = bool(user32.SetForegroundWindow(hwnd))
-        return ok
+
+        def is_foreground():
+            return (user32.GetForegroundWindow() or 0) == (hwnd or 0)
+
+        if is_foreground() or user32.SetForegroundWindow(hwnd) and is_foreground():
+            return True
+
+        foreground = user32.GetForegroundWindow()
+        their_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+        our_thread = kernel32.GetCurrentThreadId()
+        attached = False
+        if their_thread and their_thread != our_thread:
+            attached = bool(user32.AttachThreadInput(our_thread, their_thread, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(our_thread, their_thread, False)
+        if is_foreground():
+            return True
+
+        MOUSEEVENTF_MOVE = 0x0001
+        user32.mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0)
+        user32.SetForegroundWindow(hwnd)
+        return is_foreground()
     except Exception:
         return False
+
+
+def allow_any_foreground():
+    """Let any process take the foreground next (call from the foreground app)."""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        ASFW_ANY = -1
+        ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)
+    except Exception:
+        pass
 
 
 def focus_window_of_pid_soon(pid: int, attempts: int = 20, interval: float = 0.5):

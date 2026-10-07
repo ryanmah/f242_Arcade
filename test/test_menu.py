@@ -637,3 +637,57 @@ def test_menu_renders_frames_for_mpv(home, qt_app):
         window.close()
     finally:
         ipc.set_state(ipc.KEY_MENU_SURFACE, None)
+
+
+def test_volume_label_matches_the_updater_bar():
+    from fs42.menu.pages import volume_label
+
+    assert volume_label(45) == "Volume [#########-----------]  45%"
+    assert volume_label(100) == "Volume [####################] 100%"
+    assert volume_label(0) == "Volume [--------------------]   0%"
+    assert volume_label(60, muted=True).endswith("MUTE")
+
+
+def test_volume_row_slides_with_left_and_right(home, qt_app):
+    from fs42.menu import pages
+    from fs42.menu.app import _build_window
+
+    ipc.set_state(ipc.KEY_VOLUME, {"level": 50, "muted": False})
+    window = _build_window()()
+    page = window.stack[-1]
+    index = next(i for i, r in enumerate(page.rows) if r.data == "volume")
+    page.move(index - page.cursor)
+    assert page.hint == pages.HINT_SLIDER
+    while ipc.pop(ipc.TOPIC_PLAYER_CMD, "t"):
+        pass
+    page.handle("right")
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t") == {"command": "mpv_command", "action": "volume_55"}
+    page.handle("left")
+    page.handle("left")
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t")["action"] == "volume_50"
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t")["action"] == "volume_45"
+    assert "45%" in page.rows[index].title
+    page.handle("select")
+    assert ipc.pop(ipc.TOPIC_PLAYER_CMD, "t")["action"] == "volume_mute"
+    assert page.rows[index].title.endswith("MUTE")
+    assert len(window.stack) == 1           # left on this row never closed the menu
+    page.move(-1)
+    assert page.hint == pages.HINT_LIST
+    window.close()
+
+
+def test_player_sets_an_absolute_volume_and_remembers_it(home):
+    import json
+    import logging
+    from types import SimpleNamespace
+
+    from fs42 import paths
+    from fs42.station_player import StationPlayer
+
+    fake = SimpleNamespace(mpv=SimpleNamespace(volume=100.0, mute=True), _l=logging.getLogger("t"))
+    result = StationPlayer.set_volume(fake, "35")
+    assert result["level"] == 35 and result["muted"] is False
+    assert fake.mpv.volume == 35.0
+    assert json.load(open(paths.confs("main_config.json")))["volume"] == 35
+    StationPlayer.set_volume(fake, "mute")
+    assert fake.mpv.mute is True

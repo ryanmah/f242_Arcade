@@ -141,7 +141,7 @@ gamepad) to manage channels without leaving the TV:
   catalog, extend or reset its schedule, set its **Picture** (scaling: fit
   with bars, fill by cropping the edges, or stretch; and a zoom from 50% to
   200%, previewed live when you are on that channel), delete it
-- **Rebuild all catalogs** / **Add a week to all schedules**
+- **Rebuild all catalogs** / **Add a month to all schedules**
 - **Open web portal** — opens the web console in your browser and gets out
   of its way
 - **Remote Controls** — set up controllers, each with its own button layout.
@@ -164,11 +164,14 @@ gamepad) to manage channels without leaving the TV:
   nothing to play back.
 - **View** — switch between fullscreen and a window (remembered)
 - **Captions** — subtitles and closed captions, off unless you turn them on
+- **Volume** — a slider drawn like the updater's progress bar: on that row
+  ◄ ► turn it down and up (by `volume_step`, 5 by default), a digit key jumps
+  to 0-90%, and Select mutes. The level is remembered for the next start.
 - **Exit menu** — back to TV
 - **Shutdown FS42** — stops the player, the web console and the menu
 
 The menu is drawn like a VCR's on-screen display - on black, in the
-same face the channel banner uses when you flip channels: white text, a green bar on the selected line; ▲▼ move, ► (or
+same face the channel banner uses when you flip channels: white text, a white bar on the selected line; ▲▼ move, ► (or
 Enter) sets, ◄ (or Escape/Backspace) ends. The keys work whether the video window or
 the menu has focus. The phone remote gets a D-pad for the same thing, and
 mirrors what the menu is showing.

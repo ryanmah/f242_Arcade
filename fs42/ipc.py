@@ -66,6 +66,10 @@ KEY_MENU_PAGE = "menu_page"
 # new frame as KEY_MENU_FRAME = {"path", "width", "height", "stride", "serial"},
 # which the player hands to mpv's overlay-add.
 KEY_MENU_SURFACE = "menu_surface"
+# The video window's process (mpv), so the menu can give it the keyboard back
+# when it closes - the menu is the foreground app at that moment, so on
+# Windows it may; the player in the background may not.
+KEY_VIDEO_PID = "video_pid"
 KEY_MENU_FRAME = "menu_frame"
 
 _local = threading.local()

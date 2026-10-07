@@ -177,6 +177,7 @@ class StationManager(object):
                     "update_repo",
                     "menu_render",
                     "gamescope_gpu_api",
+                    "volume",
                 ]
 
                 for key in to_check:

@@ -52,6 +52,29 @@ MENU_OVERLAY_ID = 42
 STARTUP_FADE_SECONDS = 3.0
 
 
+def _remember_volume(level: int):
+    """Keep the volume in main_config.json so the next start uses it."""
+    try:
+        import json
+
+        from fs42.platform_compat import atomic_write_text
+
+        path = paths.confs("main_config.json")
+        try:
+            with open(path) as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                config = {}
+        except FileNotFoundError:
+            config = {}
+        if config.get("volume") == level:
+            return
+        config["volume"] = level
+        atomic_write_text(path, json.dumps(config, indent=4))
+    except Exception as e:
+        logging.getLogger("FieldPlayer").debug("Could not save the volume: %s", e)
+
+
 def _caption_options(on: bool) -> dict:
     if on:
         return {"sid": "auto", "sub_auto": "exact", "sub_visibility": True}
@@ -225,6 +248,9 @@ class StationPlayer:
                 "script_opts": "osc-idlescreen=no",
                 "hr_seek": "yes",
             }
+            saved_volume = StationManager().server_conf.get("volume")
+            if isinstance(saved_volume, (int, float)):
+                mpv_kwargs["volume"] = max(0, min(100, int(saved_volume)))
             from fs42 import gamescope
 
             if start_it and gamescope.active():
@@ -433,11 +459,18 @@ class StationPlayer:
                 self.mpv.volume = max(0.0, current - step)
             elif action == "mute":
                 self.mpv.mute = not bool(self.mpv.mute)
+            elif str(action).isdigit():
+                # An absolute level, from the menu's volume slider.
+                self.mpv.volume = float(max(0, min(100, int(action))))
+                if self.mpv.mute:
+                    self.mpv.mute = False
             muted = bool(self.mpv.mute)
-            level = int(float(self.mpv.volume or 0))
+            level = int(round(float(self.mpv.volume or 0)))
         except Exception as e:
             self._l.warning("Volume command '%s' failed: %s", action, e)
             return None
+        if action != "mute":
+            _remember_volume(level)
 
         response = {
             "volume": f"{level}%",
@@ -560,6 +593,7 @@ class StationPlayer:
         ipc.set_state(ipc.KEY_MENU_OPEN, True)
         ipc.set_state(ipc.KEY_INPUT_CAPTURE, False)
         ipc.set_state(ipc.KEY_MENU_FRAME, None)
+        ipc.set_state(ipc.KEY_VIDEO_PID, self._mpv_pid())
         self._menu_frame_serial = None
         if self._menu_in_mpv():
             width, height = self._osd_size()
@@ -1019,8 +1053,18 @@ class StationPlayer:
                     except Exception:
                         fading = False
                 self.mpv.command("playlist-clear")
-                self.mpv.play(file_path)
-                
+                # Open the file *at* the scheduled position.  Upstream played
+                # from 0:00 and seeked once playback was under way, so every
+                # tune-in showed the start of the file until the seek landed -
+                # a second or two, longer on files that seek slowly (sparse
+                # keyframes, AVI/MPEG-TS without an index, a slow drive).
+                start_at = offset_seconds if (not is_stream and offset_seconds and offset_seconds > 0) else None
+                self._set_start(start_at)
+                try:
+                    self.mpv.play(file_path)
+                except Exception:
+                    self._set_start(None)
+                    raise
 
                 timeout_seconds = StationManager().server_conf.get("video_seek_timeout", 10)
                 start_time = time.time()
@@ -1031,24 +1075,37 @@ class StationPlayer:
                             break
                         if time.time() - start_time > timeout_seconds:
                             self._l.error(f"Timeout waiting for playback to start on {file_path}")
+                            self._set_start(None)
                             return False
                         if is_stream:
                             response = self.input_check_fn()
                             if response and not self.handle_runtime_command_outcome(response):
                                 self._pending_response = response
+                                self._set_start(None)
                                 return False
                         self.tick_osd()
                         time.sleep(0.05)
                     except Exception as e:
                         if time.time() - start_time > timeout_seconds:
                             self._l.error(f"Error waiting for playback: {e}")
+                            self._set_start(None)
                             return False
                         self.tick_osd()
                         time.sleep(0.05)
 
-                # Perform seek if needed (before showing overlay)
-                if not is_stream and offset_seconds is not None and offset_seconds > 0:
-                    self._seek_with_verify(file_path, offset_seconds, timeout_seconds)
+                # The start position only applies to this file.
+                self._set_start(None)
+                # Fall back to seeking if the file did not open where asked
+                # (an mpv that ignores "start" for this format).
+                if start_at is not None:
+                    try:
+                        landed = self.mpv.time_pos
+                    except Exception:
+                        landed = None
+                    if landed is not None and abs(landed - start_at) <= 1.5:
+                        self._l.info(f"Opened at {landed:.2f} (target {start_at})")
+                    else:
+                        self._seek_with_verify(file_path, offset_seconds, timeout_seconds)
 
                 if fading:
                     self._startup_fade = False
@@ -1088,6 +1145,13 @@ class StationPlayer:
                 f"Encountered unknown error attempting to play {file_path} - please check your configurations."
             )
             return False
+
+    def _set_start(self, seconds):
+        """Where the next file mpv opens starts playing (None: the beginning)."""
+        try:
+            self.mpv.start = f"{float(seconds):.3f}" if seconds else "none"
+        except Exception as e:
+            self._l.debug("Could not set the start position: %s", e)
 
     def _seek_with_verify(self, file_path, offset_seconds, timeout_seconds,
                           tolerance=1.0, verify_window=2.0, retry_delay=0.2):

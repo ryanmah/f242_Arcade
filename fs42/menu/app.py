@@ -133,6 +133,7 @@ def _build_window():
             if getattr(top, "busy", False):
                 top.say("Still working - please wait", "warn")
                 return
+            _hand_focus_to_video()
             QApplication.quit()
 
         # ----------------------------------------------------------- input
@@ -174,6 +175,27 @@ def _build_window():
             painter.end()
 
     return MenuWindow
+
+
+def _hand_focus_to_video():
+    """Give the keyboard back to the video window as the menu goes away.
+
+    On Windows only the foreground app may move the foreground, and while
+    the menu is up that is us; the player, in the background, cannot do it
+    reliably afterwards.  Without this the arrow keys could land on the
+    desktop until the video was clicked.
+    """
+    from fs42 import platform_compat
+
+    if not platform_compat.IS_WINDOWS:
+        return
+    try:
+        pid = ipc.get_state(ipc.KEY_VIDEO_PID)
+    except Exception:
+        pid = None
+    platform_compat.allow_any_foreground()
+    if pid:
+        platform_compat.focus_window_of_pid(int(pid))
 
 
 def _surface():

@@ -40,6 +40,7 @@ class Row:
 HINT_LIST = "SELECT:▲ ▼ KEY\nSET   :► KEY\nEND   :◄ KEY"
 HINT_CONFIRM = "SELECT:▲ ▼ KEY\nSET   :► KEY"
 HINT_CONTINUE = "SET   :► KEY"
+HINT_SLIDER = "ADJUST:◄ ► KEY\nMUTE  :SELECT\nSELECT:▲ ▼ KEY"
 HINT_TYPE = "TYPE  :KEYBOARD\nSELECT:▲ ▼ KEY\nSET   :► KEY"
 
 
@@ -376,6 +377,40 @@ def _captions() -> bool:
     return bool(_read_main_config().get("captions", False))
 
 
+VOLUME_CELLS = 20
+
+
+def volume_label(level: int, muted: bool = False) -> str:
+    """The volume row: a bar drawn like the updater's progress bar."""
+    level = max(0, min(100, int(level)))
+    filled = int(round(level / 100 * VOLUME_CELLS))
+    bar = "[" + "#" * filled + "-" * (VOLUME_CELLS - filled) + "]"
+    return f"Volume {bar} " + ("MUTE" if muted else f"{level:>3}%")
+
+
+def _volume_state():
+    """(level, muted): what the player last reported, else the saved level."""
+    try:
+        state = ipc.get_state(ipc.KEY_VOLUME) or {}
+    except Exception:
+        state = {}
+    level = state.get("level")
+    if level is None:
+        level = _read_main_config().get("volume", 100)
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 100
+    return max(0, min(100, level)), bool(state.get("muted", False))
+
+
+def _volume_step() -> int:
+    try:
+        return max(1, int(_read_main_config().get("volume_step", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
 def _web_port():
     from fs42.station_manager import StationManager
 
@@ -389,19 +424,70 @@ class HomePage(ListPage):
         status = ipc.get_status() or {}
         now = status.get("network_name") or "nothing"
         self.subtitle = f"NOW PLAYING: {now}"
+        self._volume_now = None          # re-read what the player reports
         return [
             Row("Stations", action=lambda: self.window.push(StationsPage(self.window))),
             Row("Rebuild all catalogs", action=lambda: self.window.push(ProgressPage(self.window, "Rebuilding catalogs", lambda log: _jobs().rebuild_catalog("all", log), reload_stations=True))),
-            Row("Add a week to all schedules", action=lambda: self.window.push(ProgressPage(self.window, "Adding a week", lambda log: _jobs().add_schedule_time("week", "all", log)))),
+            Row("Add a month to all schedules", action=lambda: self.window.push(ProgressPage(self.window, "Adding a month", lambda log: _jobs().add_schedule_time("month", "all", log)))),
             Row("Open web portal", action=self._open_web_portal),
             Row("Remote Controls", action=lambda: self.window.push(ControllersPage(self.window))),
             Row("Video effects", action=lambda: self.window.push(VideoEffectsPage(self.window))),
             Row(f"View: {'Fullscreen' if _fullscreen() else 'Windowed'}", action=self._toggle_view),
             Row(f"Captions: {'On' if _captions() else 'Off'}", action=self._toggle_captions),
+            Row(volume_label(*self._volume()), action=self._toggle_mute, data="volume"),
             Row("Check for updates", action=lambda: self.window.push(UpdatePage(self.window))),
             Row("Exit menu", action=self.window.close_menu),
             Row("Shutdown FS42", action=lambda: self.window.push(ConfirmQuitPage(self.window))),
         ]
+
+    # ------------------------------------------------------------ volume
+
+    def _volume(self):
+        if getattr(self, "_volume_now", None) is None:
+            self._volume_now = _volume_state()
+        return self._volume_now
+
+    def _on_volume_row(self) -> bool:
+        row = self.current()
+        return bool(row and row.data == "volume")
+
+    def _set_volume(self, level):
+        level = max(0, min(100, int(level)))
+        self._volume_now = (level, False)
+        send_player({"command": "mpv_command", "action": f"volume_{level}"})
+        self._refresh_volume_row()
+
+    def _toggle_mute(self):
+        level, muted = self._volume()
+        self._volume_now = (level, not muted)
+        send_player({"command": "mpv_command", "action": "volume_mute"})
+        self._refresh_volume_row()
+
+    def _refresh_volume_row(self):
+        for row in self.rows:
+            if row.data == "volume":
+                row.title = volume_label(*self._volume())
+        self.update()
+        self.publish()
+
+    def move(self, delta):
+        super().move(delta)
+        self.hint = HINT_SLIDER if self._on_volume_row() else HINT_LIST
+
+    def handle(self, action) -> bool:
+        # On the volume row, left and right move the slider (like the
+        # updater's bar) instead of closing the menu / selecting.
+        if self._on_volume_row() and action in (Action.LEFT.value, Action.RIGHT.value):
+            level, _ = self._volume()
+            step = _volume_step()
+            self._set_volume(level + (step if action == Action.RIGHT.value else -step))
+            return True
+        digit = digit_value(action)
+        if self._on_volume_row() and digit is not None:
+            # 0-9 jumps straight to 0%..90% (and 0 twice is silence).
+            self._set_volume(digit * 10)
+            return True
+        return super().handle(action)
 
     def _toggle_view(self):
         """Switch the video between fullscreen and a window, and remember it."""
@@ -676,7 +762,7 @@ class StationDetailPage(ListPage):
         if station.get("_has_catalog"):
             rows.append(Row("Rebuild catalog", value=_station_summary(station), action=lambda: self.window.push(ProgressPage(self.window, f"Rebuilding {self.network_name}", lambda log: _jobs().rebuild_catalog(self.network_name, log), reload_stations=True))))
         if station.get("_has_schedule"):
-            rows.append(Row("Add a week to the schedule", action=lambda: self.window.push(ProgressPage(self.window, f"Scheduling {self.network_name}", lambda log: _jobs().add_schedule_time("week", self.network_name, log)))))
+            rows.append(Row("Add a month to the schedule", action=lambda: self.window.push(ProgressPage(self.window, f"Scheduling {self.network_name}", lambda log: _jobs().add_schedule_time("month", self.network_name, log)))))
             rows.append(Row("Reset the schedule", action=lambda: self.window.push(ProgressPage(self.window, f"Resetting {self.network_name}", lambda log: _jobs().reset_schedule(self.network_name, log)))))
         if station.get("network_type") not in ("guide", "web"):
             from fs42 import picture
